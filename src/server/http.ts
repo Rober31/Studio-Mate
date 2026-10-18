@@ -9,7 +9,10 @@ import { hashObject, nowIso, token } from "./util";
 type Params = Record<string, string>;
 type RouteContext = { params: Promise<Params> };
 
-export function ok(data: unknown, meta?: Record<string, unknown>, status = 200) {
+/** Rejects Promises at compile time so a missing `await` can never serialize as {}. */
+type NotPromise<T> = T extends PromiseLike<unknown> ? never : T;
+
+export function ok<T>(data: NotPromise<T>, meta?: Record<string, unknown>, status = 200) {
   return NextResponse.json(meta ? { data, meta } : { data }, { status });
 }
 
@@ -56,7 +59,7 @@ export function staffRoute(handler: (req: NextRequest, ctx: Ctx, params: Params)
     try {
       checkCsrf(req);
       const jar = await cookies();
-      const ctx = loadSession(jar.get(SESSION_COOKIE)?.value);
+      const ctx = await loadSession(jar.get(SESSION_COOKIE)?.value);
       if (!ctx) throw new AppError("unauthenticated", "צריך להתחבר מחדש.");
       return await handler(req, ctx, await rc.params);
     } catch (err) {
@@ -85,17 +88,17 @@ export function clientIp(req: NextRequest): string {
  * Idempotency-Key handling (API-01): same key + same body returns the stored
  * response; same key + different body is a conflict.
  */
-export function withIdempotency<T>(
+export async function withIdempotency<T>(
   studioId: string,
   scope: string,
   key: string | null,
   body: unknown,
-  fn: () => { status: number; data: T },
-): { status: number; data: T; replayed: boolean } {
-  if (!key) return { ...fn(), replayed: false };
+  fn: () => Promise<{ status: number; data: T }>,
+): Promise<{ status: number; data: T; replayed: boolean }> {
+  if (!key) return { ...(await fn()), replayed: false };
   if (key.length > 200) throw new AppError("validation", "מפתח הבקשה ארוך מדי.");
   const requestHash = hashObject(body);
-  const existing = one<{ request_hash: string; response: string; status: number }>(
+  const existing = await one<{ request_hash: string; response: string; status: number }>(
     "SELECT request_hash, response, status FROM idempotency_keys WHERE studio_id = ? AND scope = ? AND key = ?",
     studioId,
     scope,
@@ -105,8 +108,8 @@ export function withIdempotency<T>(
     if (existing.request_hash !== requestHash) throw new AppError("conflict", "הבקשה כבר נשלחה עם תוכן אחר.");
     return { status: existing.status, data: JSON.parse(existing.response) as T, replayed: true };
   }
-  const result = fn();
-  run(
+  const result = await fn();
+  await run(
     "INSERT OR IGNORE INTO idempotency_keys (studio_id, scope, key, request_hash, response, status, created_at) VALUES (?,?,?,?,?,?,?)",
     studioId,
     scope,

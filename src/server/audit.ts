@@ -1,7 +1,7 @@
 import { run } from "./db";
 import { id, nowIso } from "./util";
 
-export function audit(params: {
+export async function audit(params: {
   studioId: string | null;
   actorId: string | null;
   action: string;
@@ -10,7 +10,7 @@ export function audit(params: {
   reason?: string | null;
   diff?: unknown;
 }) {
-  run(
+  await run(
     "INSERT INTO audit_events (id, studio_id, actor_id, action, entity, entity_id, reason, diff, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
     id("aud"),
     params.studioId,

@@ -60,7 +60,7 @@ export type Studio = {
   status: string;
 };
 
-type StudioRow = {
+export type StudioRow = {
   id: string;
   name: string;
   slug: string;
@@ -95,18 +95,18 @@ export function toStudio(row: StudioRow): Studio {
   };
 }
 
-export function getStudio(id: string): Studio | undefined {
-  const row = one<StudioRow>("SELECT * FROM studios WHERE id = ?", id);
+export async function getStudio(id: string): Promise<Studio | undefined> {
+  const row = await one<StudioRow>("SELECT * FROM studios WHERE id = ?", id);
   return row ? toStudio(row) : undefined;
 }
 
-export function getStudioBySlug(slug: string): Studio | undefined {
-  const row = one<StudioRow>("SELECT * FROM studios WHERE slug = ? AND status = 'active'", slug);
+export async function getStudioBySlug(slug: string): Promise<Studio | undefined> {
+  const row = await one<StudioRow>("SELECT * FROM studios WHERE slug = ? AND status = 'active'", slug);
   return row ? toStudio(row) : undefined;
 }
 
-export function saveStudio(studio: Pick<Studio, "id" | "name" | "timezone" | "locale" | "modules" | "settings">) {
-  run(
+export async function saveStudio(studio: Pick<Studio, "id" | "name" | "timezone" | "locale" | "modules" | "settings">) {
+  await run(
     "UPDATE studios SET name = ?, timezone = ?, locale = ?, enabled_modules = ?, settings = ?, updated_at = ? WHERE id = ?",
     studio.name,
     studio.timezone,

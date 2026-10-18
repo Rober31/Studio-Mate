@@ -1,6 +1,6 @@
--- StudioMate schema. All timestamps are ISO-8601 UTC strings.
--- Every studio-owned table carries studio_id; services always filter by the
--- studio derived from the authenticated session (SEC-01, DB-01).
+// Database schema (SQLite / libSQL). Every statement is idempotent and runs once per server instance.
+// All timestamps are ISO-8601 UTC strings; every studio-owned table carries studio_id (SEC-01, DB-01).
+export const SCHEMA_SQL = `
 
 CREATE TABLE IF NOT EXISTS studios (
   id TEXT PRIMARY KEY,
@@ -472,3 +472,12 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
   created_at TEXT NOT NULL,
   PRIMARY KEY (studio_id, scope, key)
 );
+
+CREATE TABLE IF NOT EXISTS job_state (
+  studio_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (studio_id, key)
+);
+`;

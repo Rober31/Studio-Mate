@@ -8,7 +8,7 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["better-sqlite3"],
+  serverExternalPackages: ["@libsql/client", "libsql"],
   poweredByHeader: false,
   agentRules: false,
   async headers() {
