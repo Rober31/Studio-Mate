@@ -1,17 +1,28 @@
 // Time-zone helpers. Data is stored in UTC; studio-local calendar logic
 // (day boundaries, "end date includes the selected day") uses the studio's IANA zone.
 
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+function formatter(timeZone: string): Intl.DateTimeFormat {
+  let f = formatters.get(timeZone);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    formatters.set(timeZone, f);
+  }
+  return f;
+}
+
 function parts(date: Date, timeZone: string) {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  const fmt = formatter(timeZone);
   const out: Record<string, number> = {};
   for (const p of fmt.formatToParts(date)) if (p.type !== "literal") out[p.type] = Number(p.value);
   return out as { year: number; month: number; day: number; hour: number; minute: number; second: number };
