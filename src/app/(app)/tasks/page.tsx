@@ -11,13 +11,13 @@ export const metadata = { title: "משימות" };
 export default async function TasksPage() {
   const ctx = await requireCtx();
   if (!can(ctx, "contacts.view")) redirect("/");
-  const counts = taskCounts(ctx);
+  const [counts, staff] = await Promise.all([taskCounts(ctx), staffList(ctx.studio.id)]);
   const view = counts.overdue > 0 && counts.today === 0 ? "overdue" : "today";
   return (
     <TasksView
       initialView={view}
-      initial={JSON.parse(JSON.stringify({ items: listTasks(ctx, view, false), counts }))}
-      staff={staffList(ctx.studio.id)}
+      initial={JSON.parse(JSON.stringify({ items: await listTasks(ctx, view, false), counts }))}
+      staff={staff}
       me={{ id: ctx.userId, name: ctx.name }}
       tz={ctx.studio.timezone}
       canFollowup={can(ctx, "followup.use")}

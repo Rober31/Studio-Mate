@@ -75,8 +75,8 @@ export function LoginForm() {
   );
 }
 
-export function SetupForm() {
-  const f = useForm({ studio_name: "", owner_name: "", email: "", password: "" });
+export function SetupForm({ codeRequired }: { codeRequired: boolean }) {
+  const f = useForm({ setup_code: "", studio_name: "", owner_name: "", email: "", password: "" });
   const [qr, setQr] = useState(true);
   return (
     <form
@@ -93,7 +93,17 @@ export function SetupForm() {
       }}
     >
       {f.message && <Banner tone="danger">{f.message}</Banner>}
-      <TextField label="שם הסטודיו" autoFocus {...f.bind("studio_name")} placeholder="למשל: סטודיו נשימה" />
+      <TextField
+        label="קוד הקמה"
+        optional={!codeRequired}
+        type="password"
+        autoComplete="off"
+        dir="ltr"
+        autoFocus={codeRequired}
+        hint="הקוד מוגדר על ידי מי שהתקין את המערכת (משתנה SETUP_CODE). הוא מונע מאחרים להקים את המערכת לפניך."
+        {...f.bind("setup_code")}
+      />
+      <TextField label="שם הסטודיו" autoFocus={!codeRequired} {...f.bind("studio_name")} placeholder="למשל: סטודיו נשימה" />
       <TextField label="השם שלך" autoComplete="name" {...f.bind("owner_name")} />
       <TextField label="אימייל" type="email" autoComplete="email" dir="ltr" {...f.bind("email")} />
       <TextField label="סיסמה" type="password" autoComplete="new-password" dir="ltr" hint="10 תווים לפחות" {...f.bind("password")} />

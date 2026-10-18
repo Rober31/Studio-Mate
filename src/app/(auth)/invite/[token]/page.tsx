@@ -8,7 +8,7 @@ export const metadata = { title: "הזמנה לצוות" };
 
 export default async function InvitePage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
-  const info = inviteInfo(token);
+  const info = await inviteInfo(token);
   return (
     <div className="center-screen">
       <div className="auth-card">

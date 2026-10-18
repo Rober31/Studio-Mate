@@ -41,7 +41,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       tabs={tabs}
       initialTab={tab}
       studio={canSettings ? { name: s.name, slug: s.slug, timezone: s.timezone, modules: s.modules, settings: s.settings } : null}
-      team={canUsers ? listTeam(ctx) : null}
+      team={canUsers ? await listTeam(ctx) : null}
       me={{ id: ctx.userId, name: ctx.name, email: ctx.email, role: ROLE_LABEL[ctx.role] }}
       aiConfigured={!!process.env.ANTHROPIC_API_KEY}
       templates={templates}

@@ -13,8 +13,8 @@ export default async function RegistrationsPage() {
   if (!can(ctx, "registrations.review")) redirect("/");
   return (
     <RegistrationsView
-      items={JSON.parse(JSON.stringify(listRegistrations(ctx, "all")))}
-      staff={staffList(ctx.studio.id)}
+      items={JSON.parse(JSON.stringify(await listRegistrations(ctx, "all")))}
+      staff={await staffList(ctx.studio.id)}
       slug={ctx.studio.slug}
       studioName={ctx.studio.name}
       tz={ctx.studio.timezone}

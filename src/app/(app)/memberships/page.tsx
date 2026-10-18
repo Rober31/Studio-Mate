@@ -11,12 +11,12 @@ export default async function MembershipsPage({ searchParams }: { searchParams: 
   const ctx = await requireCtx();
   if (!can(ctx, "memberships.view")) redirect("/");
   const sp = await searchParams;
-  const list = listMemberships(ctx, { status: "active" });
+  const [list, plans] = await Promise.all([listMemberships(ctx, { status: "active" }), listPlans(ctx.studio.id, true)]);
   return (
     <MembershipsView
       initialTab={sp.tab === "plans" ? "plans" : "memberships"}
       initial={JSON.parse(JSON.stringify(list))}
-      plans={listPlans(ctx.studio.id, true)}
+      plans={plans}
       tz={ctx.studio.timezone}
       canManage={can(ctx, "memberships.manage")}
     />

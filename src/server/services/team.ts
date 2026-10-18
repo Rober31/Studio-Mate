@@ -1,6 +1,7 @@
 // Studio setup, staff invitations, roles and access recovery (S01, S13).
 
-import { all, one, run, tx } from "../db";
+import { all, batch, one, run, tx } from "../db";
+import crypto from "node:crypto";
 import { AppError, invalid, notFound } from "../errors";
 import { assertCan, type Ctx, type Role } from "../permissions";
 import { addDays, addHours, hashPassword, id, nowIso, sha256, token, verifyPassword } from "../util";
@@ -8,7 +9,7 @@ import { audit } from "../audit";
 import { revokeUserSessions } from "../auth";
 import { DEFAULT_SETTINGS, getStudio, saveStudio, mergeSettings, type ModuleKey, type StudioSettings } from "../studio";
 
-async function validatePassword(password: string | undefined): string | null {
+function validatePassword(password: string | undefined): string | null {
   if (!password || password.length < 10) return "סיסמה של 10 תווים לפחות.";
   if (password.length > 200) return "הסיסמה ארוכה מדי.";
   return null;
@@ -16,11 +17,11 @@ async function validatePassword(password: string | undefined): string | null {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export async function hasAnyStudio(): boolean {
+export async function hasAnyStudio(): Promise<boolean> {
   return !!await one("SELECT 1 FROM studios LIMIT 1");
 }
 
-async function slugify(name: string): string {
+function slugify(name: string): string {
   const base = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -30,8 +31,25 @@ async function slugify(name: string): string {
 }
 
 /** First-run setup: creates the first studio and its owner. Disabled once a studio exists. */
-export async function setupStudio(input: { studio_name?: string; owner_name?: string; email?: string; password?: string; timezone?: string; modules?: ModuleKey[] }) {
+/** In production the first-run screen requires SETUP_CODE so strangers cannot claim a fresh deployment. */
+export function setupCodeRequired(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
+function checkSetupCode(code: string | undefined) {
+  if (!setupCodeRequired()) return;
+  const expected = process.env.SETUP_CODE;
+  if (!expected) {
+    throw new AppError("forbidden", "ההקמה נעולה: צריך להגדיר משתנה SETUP_CODE בהגדרות האחסון (למשל ב-Vercel) ואז לנסות שוב.");
+  }
+  const a = crypto.createHash("sha256").update(code ?? "").digest();
+  const b = crypto.createHash("sha256").update(expected).digest();
+  if (!crypto.timingSafeEqual(a, b)) throw invalid({ setup_code: "קוד ההקמה אינו נכון." });
+}
+
+export async function setupStudio(input: { studio_name?: string; owner_name?: string; email?: string; password?: string; timezone?: string; modules?: ModuleKey[]; setup_code?: string }) {
   if (await hasAnyStudio()) throw new AppError("forbidden", "המערכת כבר הוגדרה.");
+  checkSetupCode(input.setup_code);
   const fields: Record<string, string> = {};
   if (!input.studio_name?.trim()) fields.studio_name = "מה שם הסטודיו?";
   if (!input.owner_name?.trim()) fields.owner_name = "מה השם שלך?";
@@ -54,8 +72,8 @@ export async function createStudioWithOwner(p: { studioName: string; ownerName: 
   const studioId = id("std");
   const existingUser = await one<{ id: string }>("SELECT id FROM users WHERE email = ?", p.email);
   const userId = existingUser?.id ?? id("usr");
-  await tx(async () => {
-    await run(
+  const stmts: [string, ...unknown[]][] = [
+    [
       "INSERT INTO studios (id, name, slug, timezone, locale, enabled_modules, settings, status, created_at, updated_at) VALUES (?,?,?,?, 'he', ?,?, 'active', ?,?)",
       studioId,
       p.studioName,
@@ -65,28 +83,39 @@ export async function createStudioWithOwner(p: { studioName: string; ownerName: 
       JSON.stringify(DEFAULT_SETTINGS),
       now,
       now,
-    );
-    if (!existingUser) {
-      await run("INSERT INTO users (id, email, name, password_hash, created_at, updated_at) VALUES (?,?,?,?,?,?)", userId, p.email, p.ownerName, hashPassword(p.password), now, now);
-    }
-    await run("INSERT INTO staff_memberships (id, studio_id, user_id, role, scope, active, created_at) VALUES (?,?,?, 'owner', 'all', 1, ?)", id("stm"), studioId, userId, now);
-    for (const [provider, name] of [
-      ["csv", "ייבוא קבצים (CSV)"],
-      ["booking_app", "אפליקציית ההזמנות"],
-      ["monday", "Monday"],
-    ]) {
-      await run(
-        "INSERT INTO integration_connections (id, studio_id, provider, name, status, freshness_hours, created_at, updated_at) VALUES (?,?,?,?, 'not_connected', 24, ?,?)",
-        id("int"),
-        studioId,
-        provider,
-        name,
-        now,
-        now,
-      );
-    }
-    await audit({ studioId, actorId: userId, action: "studio.created", entity: "studio", entityId: studioId });
-  });
+    ],
+  ];
+  if (!existingUser) {
+    stmts.push(["INSERT INTO users (id, email, name, password_hash, created_at, updated_at) VALUES (?,?,?,?,?,?)", userId, p.email, p.ownerName, hashPassword(p.password), now, now]);
+  }
+  stmts.push(["INSERT INTO staff_memberships (id, studio_id, user_id, role, scope, active, created_at) VALUES (?,?,?, 'owner', 'all', 1, ?)", id("stm"), studioId, userId, now]);
+  for (const [provider, name] of [
+    ["csv", "ייבוא קבצים (CSV)"],
+    ["booking_app", "אפליקציית ההזמנות"],
+    ["monday", "Monday"],
+  ]) {
+    stmts.push([
+      "INSERT INTO integration_connections (id, studio_id, provider, name, status, freshness_hours, created_at, updated_at) VALUES (?,?,?,?, 'not_connected', 24, ?,?)",
+      id("int"),
+      studioId,
+      provider,
+      name,
+      now,
+      now,
+    ]);
+  }
+  stmts.push([
+    "INSERT INTO audit_events (id, studio_id, actor_id, action, entity, entity_id, created_at) VALUES (?,?,?,?,?,?,?)",
+    id("aud"),
+    studioId,
+    userId,
+    "studio.created",
+    "studio",
+    studioId,
+    now,
+  ]);
+  // One atomic round trip.
+  await batch(stmts);
   return { studioId, userId };
 }
 
@@ -196,7 +225,7 @@ export async function updateMember(ctx: Ctx, userId: string, input: { role?: Rol
   assertCan(ctx, "users");
   const m = await one<{ role: Role; active: number }>("SELECT role, active FROM staff_memberships WHERE studio_id = ? AND user_id = ?", ctx.studio.id, userId);
   if (!m) throw notFound("המשתמש");
-  const owners = await one<{ n: number }>("SELECT COUNT(*) AS n FROM staff_memberships WHERE studio_id = ? AND role = 'owner' AND active = 1", ctx.studio.id)!.n;
+  const owners = (await one<{ n: number }>("SELECT COUNT(*) AS n FROM staff_memberships WHERE studio_id = ? AND role = 'owner' AND active = 1", ctx.studio.id))!.n;
   const losingOwner = m.role === "owner" && m.active === 1 && ((input.role && input.role !== "owner") || input.active === false);
   if (losingOwner && owners <= 1) throw new AppError("blocked", "חייב להישאר לפחות בעלים פעיל אחד.");
   if (input.role && !["owner", "staff", "instructor"].includes(input.role)) throw invalid({ role: "תפקיד לא מוכר." });
@@ -240,7 +269,7 @@ export async function resetPassword(rawToken: string, password: string) {
 }
 
 export async function changePassword(ctx: Ctx, current: string, next: string) {
-  const u = await one<{ password_hash: string }>("SELECT password_hash FROM users WHERE id = ?", ctx.userId)!;
+  const u = (await one<{ password_hash: string }>("SELECT password_hash FROM users WHERE id = ?", ctx.userId))!;
   if (!verifyPassword(current ?? "", u.password_hash)) throw invalid({ current: "הסיסמה הנוכחית אינה נכונה." });
   const pw = validatePassword(next);
   if (pw) throw invalid({ next: pw });
@@ -253,7 +282,7 @@ export async function updateStudioSettings(
   input: { name?: string; timezone?: string; modules?: ModuleKey[]; settings?: Partial<StudioSettings> },
 ) {
   assertCan(ctx, "settings");
-  const studio = await getStudio(ctx.studio.id)!;
+  const studio = (await getStudio(ctx.studio.id))!;
   const fields: Record<string, string> = {};
   const name = input.name !== undefined ? input.name.trim() : studio.name;
   if (!name) fields.name = "צריך שם לסטודיו.";
@@ -287,5 +316,5 @@ export async function updateStudioSettings(
   if (Object.keys(fields).length) throw invalid(fields);
   await saveStudio({ id: studio.id, name, timezone: tz, locale: studio.locale, modules, settings });
   await audit({ studioId: studio.id, actorId: ctx.userId, action: "settings.updated", entity: "studio", entityId: studio.id, diff: { modules, rules: settings.rules } });
-  return await getStudio(studio.id)!;
+  return (await getStudio(studio.id))!;
 }

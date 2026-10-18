@@ -11,13 +11,13 @@ export const metadata = { title: "ייבוא וחיבורים" };
 export default async function ImportsPage() {
   const ctx = await requireCtx();
   if (!can(ctx, "imports")) redirect("/");
-  const connections = all<{ provider: string; name: string; status: string; last_success_at: string | null; freshness_hours: number; last_error: string | null }>(
+  const connections = await all<{ provider: string; name: string; status: string; last_success_at: string | null; freshness_hours: number; last_error: string | null }>(
     "SELECT provider, name, status, last_success_at, freshness_hours, last_error FROM integration_connections WHERE studio_id = ? ORDER BY provider",
     ctx.studio.id,
   );
   return (
     <ImportsView
-      history={listImports(ctx)}
+      history={await listImports(ctx)}
       connections={connections}
       fields={[...IMPORT_FIELDS]}
       canExport={can(ctx, "export")}

@@ -1,6 +1,6 @@
 // CSV import with dry run, idempotent commit and safe rollback (spec §22, CSV-01, AC-I01).
 
-import { all, one, run, tx } from "../db";
+import { all, batch, one, placeholders, run, tx } from "../db";
 import { AppError, invalid, notFound } from "../errors";
 import { assertCan, type Ctx } from "../permissions";
 import { hashObject, id, nowIso, parseJson, sha256 } from "../util";
@@ -144,7 +144,7 @@ type RowResult = {
   matchId?: string | null;
 };
 
-export function previewImport(
+export async function previewImport(
   ctx: Ctx,
   input: { file_name?: string; content?: string; mapping?: Record<string, string>; date_format?: DateFormat },
 ) {
@@ -164,10 +164,23 @@ export function previewImport(
     return { needsMapping: true, headers, mapping, sample: rows.slice(1, 6) };
   }
 
-  const owners = all<{ id: string; name: string; email: string }>(
-    "SELECT u.id, u.name, u.email FROM staff_memberships m JOIN users u ON u.id = m.user_id WHERE m.studio_id = ? AND m.active = 1",
-    ctx.studio.id,
-  );
+  // Two queries for the whole file; matching happens in memory.
+  const [owners, existing] = await Promise.all([
+    all<{ id: string; name: string; email: string }>(
+      "SELECT u.id, u.name, u.email FROM staff_memberships m JOIN users u ON u.id = m.user_id WHERE m.studio_id = ? AND m.active = 1",
+      ctx.studio.id,
+    ),
+    all<{ id: string; phone_e164: string | null; external_id: string | null; source: string }>(
+      "SELECT id, phone_e164, external_id, source FROM contacts WHERE studio_id = ? AND merged_into IS NULL AND archived = 0 ORDER BY created_at",
+      ctx.studio.id,
+    ),
+  ]);
+  const byExternal = new Map<string, string>();
+  const byPhone = new Map<string, string>();
+  for (const c of existing) {
+    if (c.source === "import" && c.external_id && !byExternal.has(c.external_id)) byExternal.set(c.external_id, c.id);
+    if (c.phone_e164 && !byPhone.has(c.phone_e164)) byPhone.set(c.phone_e164, c.id);
+  }
   const seenPhones = new Map<string, number>();
   const results: RowResult[] = [];
   rows.slice(1).forEach((cells, i) => {
@@ -218,8 +231,8 @@ export function previewImport(
     }
     // Match: source id first, then normalized phone (name alone is never a key).
     let match: { id: string } | undefined;
-    if (data.external_id) match = one("SELECT id FROM contacts WHERE studio_id = ? AND source = 'import' AND external_id = ? AND merged_into IS NULL AND archived = 0", ctx.studio.id, data.external_id);
-    if (!match && phone.valid && phone.e164) match = one("SELECT id FROM contacts WHERE studio_id = ? AND phone_e164 = ? AND merged_into IS NULL AND archived = 0", ctx.studio.id, phone.e164);
+    if (data.external_id && byExternal.has(data.external_id)) match = { id: byExternal.get(data.external_id)! };
+    if (!match && phone.valid && phone.e164 && byPhone.has(phone.e164)) match = { id: byPhone.get(phone.e164)! };
     if (phone.valid && phone.e164) {
       const prev = seenPhones.get(phone.e164);
       if (prev && !match) {
@@ -241,7 +254,7 @@ export function previewImport(
     error: results.filter((r) => r.status === "error").length,
   };
   const batchId = id("imp");
-  run(
+  await run(
     `INSERT INTO import_batches (id, studio_id, kind, file_name, file_hash, mapping, preview_hash, status, total_rows, ok_rows, error_rows, duplicate_rows, raw, created_by, created_at)
      VALUES (?,?, 'contacts', ?,?,?,?, 'previewed', ?,?,?,?,?,?,?)`,
     batchId,
@@ -261,66 +274,83 @@ export function previewImport(
   return { needsMapping: false, batchId, previewHash, headers, mapping, counts, rows: results.slice(0, 500) };
 }
 
-export function commitImport(ctx: Ctx, batchId: string, previewHash: string) {
-  assertCan(ctx, "imports");
-  const batch = one<{ id: string; status: string; preview_hash: string; raw: string; mapping: string }>(
-    "SELECT id, status, preview_hash, raw, mapping FROM import_batches WHERE id = ? AND studio_id = ?",
-    batchId,
-    ctx.studio.id,
-  );
-  if (!batch) throw notFound("הייבוא");
-  if (batch.preview_hash !== previewHash) throw new AppError("conflict", "התצוגה המקדימה השתנתה. הכינו תצוגה מקדימה מחדש.");
-  if (batch.status === "committed") return importReport(ctx, batchId); // idempotent replay (AC-I01)
-  if (batch.status !== "previewed") throw new AppError("conflict", "הייבוא הזה כבר בוטל.");
-  // Same file committed earlier in another batch: do not duplicate.
-  const earlier = one<{ id: string }>(
-    "SELECT id FROM import_batches WHERE studio_id = ? AND preview_hash = ? AND status = 'committed' AND id <> ?",
-    ctx.studio.id,
-    previewHash,
-    batchId,
-  );
-  if (earlier) throw new AppError("conflict", "הקובץ הזה כבר יובא בעבר עם אותו מיפוי. אין צורך לייבא שוב.", { details: { batchId: earlier.id } });
+const CHUNK = 300;
 
-  const rows = parseJson<RowResult[]>(batch.raw, []);
+export async function commitImport(ctx: Ctx, batchId: string, previewHash: string) {
+  assertCan(ctx, "imports");
+  const sid = ctx.studio.id;
   const tz = ctx.studio.timezone;
   const now = nowIso();
-  tx(() => {
-    const planCache = new Map<string, string>();
+  let rowCount = 0;
+  // The whole commit is one write transaction: status checks, lookups and all writes.
+  const replay = await tx(async () => {
+    const batchRow = await one<{ id: string; status: string; preview_hash: string; raw: string; mapping: string }>(
+      "SELECT id, status, preview_hash, raw, mapping FROM import_batches WHERE id = ? AND studio_id = ?",
+      batchId,
+      sid,
+    );
+    if (!batchRow) throw notFound("הייבוא");
+    if (batchRow.preview_hash !== previewHash) throw new AppError("conflict", "התצוגה המקדימה השתנתה. הכינו תצוגה מקדימה מחדש.");
+    if (batchRow.status === "committed") return true; // idempotent replay (AC-I01)
+    if (batchRow.status !== "previewed") throw new AppError("conflict", "הייבוא הזה כבר בוטל.");
+    // Same file committed earlier in another batch: do not duplicate.
+    const earlier = await one<{ id: string }>(
+      "SELECT id FROM import_batches WHERE studio_id = ? AND preview_hash = ? AND status = 'committed' AND id <> ?",
+      sid,
+      previewHash,
+      batchId,
+    );
+    if (earlier) throw new AppError("conflict", "הקובץ הזה כבר יובא בעבר עם אותו מיפוי. אין צורך לייבא שוב.", { details: { batchId: earlier.id } });
+
+    const rows = parseJson<RowResult[]>(batchRow.raw, []);
+    rowCount = rows.length;
+    const [active, plans, memberships] = await Promise.all([
+      all<{ id: string; phone_e164: string | null }>("SELECT id, phone_e164 FROM contacts WHERE studio_id = ? AND merged_into IS NULL AND archived = 0", sid),
+      all<{ id: string; name: string }>("SELECT id, name FROM plans WHERE studio_id = ?", sid),
+      all<{ id: string; contact_id: string; plan_id: string; starts_at: string }>(
+        "SELECT id, contact_id, plan_id, starts_at FROM memberships WHERE studio_id = ? AND authority = 'external'",
+        sid,
+      ),
+    ]);
+    const activeIds = new Set(active.map((c) => c.id));
+    const phones = new Set(active.map((c) => c.phone_e164).filter(Boolean) as string[]);
+    const planIds = new Map<string, string>();
+    for (const p of plans) if (!planIds.has(p.name)) planIds.set(p.name, p.id);
+    const extMemberships = new Map(memberships.map((m) => [`${m.contact_id}|${m.plan_id}|${m.starts_at}`, m.id]));
+
+    const stmts: [string, ...unknown[]][] = [];
     const getPlan = (name: string, hasBalance: boolean) => {
       const key = name.trim();
-      if (planCache.has(key)) return planCache.get(key)!;
-      let p = one<{ id: string }>("SELECT id FROM plans WHERE studio_id = ? AND name = ?", ctx.studio.id, key);
-      if (!p) {
-        const pid = id("pln");
-        run(
-          "INSERT INTO plans (id, studio_id, name, type, sessions_granted, validity_days, deducts, active, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?)",
-          pid,
-          ctx.studio.id,
-          key,
-          hasBalance ? "punch_period" : "period",
-          hasBalance ? 10 : null,
-          30,
-          hasBalance ? 1 : 0,
-          now,
-          now,
-        );
-        p = { id: pid };
-      }
-      planCache.set(key, p.id);
-      return p.id;
+      const existingId = planIds.get(key);
+      if (existingId) return existingId;
+      const pid = id("pln");
+      stmts.push([
+        "INSERT INTO plans (id, studio_id, name, type, sessions_granted, validity_days, deducts, active, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?)",
+        pid,
+        sid,
+        key,
+        hasBalance ? "punch_period" : "period",
+        hasBalance ? 10 : null,
+        30,
+        hasBalance ? 1 : 0,
+        now,
+        now,
+      ]);
+      planIds.set(key, pid);
+      return pid;
     };
 
     for (const r of rows) {
       if (r.status === "error") {
-        run("INSERT OR IGNORE INTO import_row_results (id, batch_id, studio_id, row_number, status, message, data) VALUES (?,?,?,?,?,?,?)", id("irr"), batchId, ctx.studio.id, r.row, "error", r.message, JSON.stringify(r.data));
+        stmts.push(["INSERT OR IGNORE INTO import_row_results (id, batch_id, studio_id, row_number, status, message, data) VALUES (?,?,?,?,?,?,?)", id("irr"), batchId, sid, r.row, "error", r.message, JSON.stringify(r.data)]);
         continue;
       }
       const d = r.data;
       let contactId = r.matchId ?? null;
       let status = "created";
-      if (contactId && one("SELECT 1 FROM contacts WHERE id = ? AND studio_id = ? AND merged_into IS NULL AND archived = 0", contactId, ctx.studio.id)) {
+      if (contactId && activeIds.has(contactId)) {
         // Update only empty fields; never overwrite data staff already verified.
-        run(
+        stmts.push([
           `UPDATE contacts SET interest = COALESCE(interest, ?), owner_id = COALESCE(owner_id, ?), external_id = COALESCE(external_id, ?),
              preferred_language = COALESCE(preferred_language, ?), version = version + 1, updated_at = ? WHERE id = ?`,
           d.interest || null,
@@ -329,19 +359,21 @@ export function commitImport(ctx: Ctx, batchId: string, previewHash: string) {
           ["he", "ar", "en"].includes(d.language) ? d.language : null,
           now,
           contactId,
-        );
+        ]);
         status = "updated";
       } else {
         contactId = id("con");
         const phone = normalizePhone(d.phone, ctx.studio.default_country);
-        const dupPhone = phone.valid && phone.e164 ? one("SELECT 1 FROM contacts WHERE studio_id = ? AND phone_e164 = ? AND merged_into IS NULL AND archived = 0", ctx.studio.id, phone.e164) : null;
-        const review = r.status === "needs_review" || !!dupPhone;
-        run(
+        const dupPhone = !!(phone.valid && phone.e164 && phones.has(phone.e164));
+        if (phone.e164) phones.add(phone.e164);
+        activeIds.add(contactId);
+        const review = r.status === "needs_review" || dupPhone;
+        stmts.push([
           `INSERT INTO contacts (id, studio_id, display_name, phone_e164, phone_raw, phone_valid, preferred_language, pipeline_stage, owner_id, source, external_id,
              interest, tags, needs_review, review_reason, created_at, updated_at)
            VALUES (?,?,?,?,?,?,?,?,?, 'import', ?,?,?,?,?,?,?)`,
           contactId,
-          ctx.studio.id,
+          sid,
           d.display_name,
           phone.e164,
           d.phone || null,
@@ -356,48 +388,45 @@ export function commitImport(ctx: Ctx, batchId: string, previewHash: string) {
           review ? (r.message || "duplicate_phone").slice(0, 200) : null,
           now,
           now,
-        );
-        run(
+        ]);
+        stmts.push([
           "INSERT INTO stage_changes (id, studio_id, contact_id, from_stage, to_stage, reason, actor_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
           id("stg"),
-          ctx.studio.id,
+          sid,
           contactId,
           null,
           d.stage_key || "new_lead",
           `ייבוא ${batchId}`,
           ctx.userId,
           now,
-        );
-        if (d.note) run("INSERT INTO notes (id, studio_id, contact_id, body, is_private, author_id, created_at) VALUES (?,?,?,?,0,?,?)", id("not"), ctx.studio.id, contactId, d.note.slice(0, 4000), ctx.userId, now);
+        ]);
+        if (d.note) stmts.push(["INSERT INTO notes (id, studio_id, contact_id, body, is_private, author_id, created_at) VALUES (?,?,?,?,0,?,?)", id("not"), sid, contactId, d.note.slice(0, 4000), ctx.userId, now]);
         status = review ? "needs_review" : "created";
       }
       if (d.plan_name && d.membership_start_iso) {
         const planId = getPlan(d.plan_name, !!d.balance);
         const startsAt = startOfLocalDay(d.membership_start_iso, tz).toISOString();
         const endsAt = d.membership_end_iso ? endDateToExclusive(d.membership_end_iso, tz) : null;
-        const existing = one<{ id: string }>(
-          "SELECT id FROM memberships WHERE studio_id = ? AND contact_id = ? AND plan_id = ? AND starts_at = ? AND authority = 'external'",
-          ctx.studio.id,
-          contactId,
-          planId,
-          startsAt,
-        );
-        if (existing) {
-          run(
+        const key = `${contactId}|${planId}|${startsAt}`;
+        const existingId = extMemberships.get(key);
+        if (existingId) {
+          stmts.push([
             "UPDATE memberships SET ends_at = ?, external_balance = ?, source_updated_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND (source_updated_at IS NULL OR source_updated_at <= ?)",
             endsAt,
             d.balance ? Number(d.balance) : null,
             now,
             now,
-            existing.id,
+            existingId,
             now,
-          );
+          ]);
         } else {
-          run(
+          const mid = id("mem");
+          extMemberships.set(key, mid);
+          stmts.push([
             `INSERT INTO memberships (id, studio_id, contact_id, plan_id, authority, external_id, starts_at, ends_at, external_balance, source_updated_at, reference, created_by, created_at, updated_at)
              VALUES (?,?,?,?, 'external', ?,?,?,?,?,?,?,?,?)`,
-            id("mem"),
-            ctx.studio.id,
+            mid,
+            sid,
             contactId,
             planId,
             d.external_id || null,
@@ -409,101 +438,145 @@ export function commitImport(ctx: Ctx, batchId: string, previewHash: string) {
             ctx.userId,
             now,
             now,
-          );
+          ]);
         }
       }
-      run(
+      stmts.push([
         "INSERT OR IGNORE INTO import_row_results (id, batch_id, studio_id, row_number, status, message, contact_id, data) VALUES (?,?,?,?,?,?,?,?)",
         id("irr"),
         batchId,
-        ctx.studio.id,
+        sid,
         r.row,
         status,
         r.message,
         contactId,
         JSON.stringify(d),
-      );
+      ]);
     }
-    run("UPDATE import_batches SET status = 'committed', committed_at = ? WHERE id = ?", now, batchId);
-    run(
+    stmts.push(["UPDATE import_batches SET status = 'committed', committed_at = ? WHERE id = ?", now, batchId]);
+    stmts.push([
       `INSERT INTO integration_connections (id, studio_id, provider, name, status, freshness_hours, last_success_at, created_at, updated_at)
        VALUES (?,?, 'csv', 'ייבוא קבצים', 'active', ?,?,?,?)
        ON CONFLICT(studio_id, provider) DO UPDATE SET status = 'active', last_success_at = excluded.last_success_at, updated_at = excluded.updated_at`,
       id("int"),
-      ctx.studio.id,
+      sid,
       ctx.studio.settings.importFreshnessHours,
       now,
       now,
       now,
-    );
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "import.committed", entity: "import_batch", entityId: batchId, diff: { rows: rows.length } });
+    ]);
+    stmts.push([
+      "INSERT INTO audit_events (id, studio_id, actor_id, action, entity, entity_id, diff, created_at) VALUES (?,?,?,?,?,?,?,?)",
+      id("aud"),
+      sid,
+      ctx.userId,
+      "import.committed",
+      "import_batch",
+      batchId,
+      JSON.stringify({ rows: rows.length }),
+      now,
+    ]);
+    for (let i = 0; i < stmts.length; i += CHUNK) await batch(stmts.slice(i, i + CHUNK));
+    return false;
   });
-  markEvaluationStale(ctx.studio.id);
+  if (!replay && rowCount) await markEvaluationStale(sid);
   return importReport(ctx, batchId);
 }
 
-export function importReport(ctx: Ctx, batchId: string) {
+export async function importReport(ctx: Ctx, batchId: string) {
   assertCan(ctx, "imports");
-  const batch = one<{ id: string; file_name: string; status: string; total_rows: number; created_at: string; committed_at: string | null }>(
+  const batchRow = await one<{ id: string; file_name: string; status: string; total_rows: number; created_at: string; committed_at: string | null }>(
     "SELECT id, file_name, status, total_rows, created_at, committed_at FROM import_batches WHERE id = ? AND studio_id = ?",
     batchId,
     ctx.studio.id,
   );
-  if (!batch) throw notFound("הייבוא");
-  const results = all<{ row_number: number; status: string; message: string | null; contact_id: string | null; data: string }>(
+  if (!batchRow) throw notFound("הייבוא");
+  const results = await all<{ row_number: number; status: string; message: string | null; contact_id: string | null; data: string }>(
     "SELECT row_number, status, message, contact_id, data FROM import_row_results WHERE batch_id = ? ORDER BY row_number",
     batchId,
   );
   const counts: Record<string, number> = {};
   for (const r of results) counts[r.status] = (counts[r.status] ?? 0) + 1;
   return {
-    batch,
+    batch: batchRow,
     counts,
     rows: results.map((r) => ({ row: r.row_number, status: r.status, message: r.message, contactId: r.contact_id, name: parseJson<Record<string, string>>(r.data, {}).display_name ?? "" })),
   };
 }
 
-export function listImports(ctx: Ctx) {
+export async function listImports(ctx: Ctx) {
   assertCan(ctx, "imports");
-  return all<{ id: string; file_name: string; status: string; total_rows: number; ok_rows: number; error_rows: number; created_at: string; committed_at: string | null; created_by_name: string | null }>(
+  return await all<{ id: string; file_name: string; status: string; total_rows: number; ok_rows: number; error_rows: number; created_at: string; committed_at: string | null; created_by_name: string | null }>(
     "SELECT b.id, b.file_name, b.status, b.total_rows, b.ok_rows, b.error_rows, b.created_at, b.committed_at, u.name AS created_by_name FROM import_batches b LEFT JOIN users u ON u.id = b.created_by WHERE b.studio_id = ? AND b.status <> 'previewed' ORDER BY b.created_at DESC LIMIT 50",
     ctx.studio.id,
   );
 }
 
 /** Rollback is allowed only while the imported records are untouched (spec CSV-01). */
-export function rollbackImport(ctx: Ctx, batchId: string) {
+export async function rollbackImport(ctx: Ctx, batchId: string) {
   assertCan(ctx, "imports");
-  const batch = one<{ status: string; committed_at: string }>("SELECT status, committed_at FROM import_batches WHERE id = ? AND studio_id = ?", batchId, ctx.studio.id);
-  if (!batch) throw notFound("הייבוא");
-  if (batch.status !== "committed") throw new AppError("conflict", "אפשר לבטל רק ייבוא שבוצע.");
-  const created = all<{ contact_id: string }>(
-    "SELECT contact_id FROM import_row_results WHERE batch_id = ? AND status IN ('created','needs_review') AND contact_id IS NOT NULL",
-    batchId,
-  );
-  const touched = created.filter((r) => {
-    const c = one<{ version: number }>("SELECT version FROM contacts WHERE id = ?", r.contact_id);
-    const activity =
-      one("SELECT 1 FROM tasks WHERE contact_id = ? LIMIT 1", r.contact_id) ||
-      one("SELECT 1 FROM interaction_events WHERE contact_id = ? LIMIT 1", r.contact_id) ||
-      one("SELECT 1 FROM attendance WHERE contact_id = ? LIMIT 1", r.contact_id) ||
-      one("SELECT 1 FROM memberships WHERE contact_id = ? AND authority = 'local' LIMIT 1", r.contact_id);
-    return !c || c.version > 1 || !!activity;
-  });
-  if (touched.length) {
-    throw new AppError("conflict", `כבר בוצעו שינויים ב-${touched.length} תיקים מהייבוא, לכן אי אפשר לבטל אותו אוטומטית. אפשר לתקן ידנית או לשחזר לסביבת בדיקה.`);
-  }
-  const now = nowIso();
-  tx(() => {
-    for (const r of created) {
-      run("UPDATE contacts SET archived = 1, merged_into = NULL, external_id = NULL, needs_review = 0, version = version + 1, updated_at = ? WHERE id = ?", now, r.contact_id);
-      run("UPDATE memberships SET cancelled_at = ?, cancel_reason = 'ביטול ייבוא' WHERE contact_id = ? AND authority = 'external' AND cancelled_at IS NULL", now, r.contact_id);
+  const sid = ctx.studio.id;
+  const result = await tx(async () => {
+    const batchRow = await one<{ status: string }>("SELECT status FROM import_batches WHERE id = ? AND studio_id = ?", batchId, sid);
+    if (!batchRow) throw notFound("הייבוא");
+    if (batchRow.status !== "committed") throw new AppError("conflict", "אפשר לבטל רק ייבוא שבוצע.");
+    const created = (
+      await all<{ contact_id: string }>(
+        "SELECT contact_id FROM import_row_results WHERE batch_id = ? AND studio_id = ? AND status IN ('created','needs_review') AND contact_id IS NOT NULL",
+        batchId,
+        sid,
+      )
+    ).map((r) => r.contact_id);
+    // Grouped checks: a record counts as touched if it was edited or has any activity.
+    const touched = new Set<string>();
+    for (let i = 0; i < created.length; i += 500) {
+      const ids = created.slice(i, i + 500);
+      const ph = placeholders(ids.length);
+      const [versions, activity] = await Promise.all([
+        all<{ id: string; version: number }>(`SELECT id, version FROM contacts WHERE id IN (${ph})`, ...ids),
+        all<{ contact_id: string }>(
+          `SELECT contact_id FROM tasks WHERE contact_id IN (${ph})
+           UNION SELECT contact_id FROM interaction_events WHERE contact_id IN (${ph})
+           UNION SELECT contact_id FROM attendance WHERE contact_id IN (${ph})
+           UNION SELECT contact_id FROM memberships WHERE authority = 'local' AND contact_id IN (${ph})`,
+          ...ids,
+          ...ids,
+          ...ids,
+          ...ids,
+        ),
+      ]);
+      const found = new Map(versions.map((v) => [v.id, v.version]));
+      for (const cid of ids) if (!found.has(cid) || found.get(cid)! > 1) touched.add(cid);
+      for (const a of activity) touched.add(a.contact_id);
     }
-    run("UPDATE import_batches SET status = 'rolled_back' WHERE id = ?", batchId);
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "import.rolled_back", entity: "import_batch", entityId: batchId, diff: { archived: created.length } });
+    if (touched.size) {
+      throw new AppError("conflict", `כבר בוצעו שינויים ב-${touched.size} תיקים מהייבוא, לכן אי אפשר לבטל אותו אוטומטית. אפשר לתקן ידנית או לשחזר לסביבת בדיקה.`);
+    }
+    const now = nowIso();
+    const stmts: [string, ...unknown[]][] = [];
+    for (let i = 0; i < created.length; i += 500) {
+      const ids = created.slice(i, i + 500);
+      const ph = placeholders(ids.length);
+      stmts.push([`UPDATE contacts SET archived = 1, merged_into = NULL, external_id = NULL, needs_review = 0, version = version + 1, updated_at = ? WHERE studio_id = ? AND id IN (${ph})`, now, sid, ...ids]);
+      stmts.push([`UPDATE memberships SET cancelled_at = ?, cancel_reason = 'ביטול ייבוא' WHERE studio_id = ? AND authority = 'external' AND cancelled_at IS NULL AND contact_id IN (${ph})`, now, sid, ...ids]);
+    }
+    stmts.push(["UPDATE import_batches SET status = 'rolled_back' WHERE id = ?", batchId]);
+    stmts.push([
+      "INSERT INTO audit_events (id, studio_id, actor_id, action, entity, entity_id, diff, created_at) VALUES (?,?,?,?,?,?,?,?)",
+      id("aud"),
+      sid,
+      ctx.userId,
+      "import.rolled_back",
+      "import_batch",
+      batchId,
+      JSON.stringify({ archived: created.length }),
+      now,
+    ]);
+    await batch(stmts);
+    return { archived: created.length };
   });
-  markEvaluationStale(ctx.studio.id);
-  return { archived: created.length };
+  await markEvaluationStale(sid);
+  return result;
 }
 
 /** Neutralizes values that a spreadsheet could execute as formulas (CSV injection). */
@@ -517,15 +590,15 @@ export function toCsv(headers: string[], rows: unknown[][]): string {
   return "﻿" + [headers.map(csvCell).join(","), ...rows.map((r) => r.map(csvCell).join(","))].join("\r\n");
 }
 
-export function exportContactsCsv(ctx: Ctx) {
+export async function exportContactsCsv(ctx: Ctx) {
   assertCan(ctx, "export");
-  const rows = all<{ display_name: string; phone_e164: string | null; pipeline_stage: string; owner: string | null; source: string; interest: string | null; tags: string; allowed: number | null; created_at: string }>(
+  const rows = await all<{ display_name: string; phone_e164: string | null; pipeline_stage: string; owner: string | null; source: string; interest: string | null; tags: string; allowed: number | null; created_at: string }>(
     `SELECT c.display_name, c.phone_e164, c.pipeline_stage, u.name AS owner, c.source, c.interest, c.tags, p.allowed, c.created_at
        FROM contacts c LEFT JOIN users u ON u.id = c.owner_id LEFT JOIN contact_preferences p ON p.contact_id = c.id AND p.channel = 'whatsapp'
       WHERE c.studio_id = ? AND c.merged_into IS NULL AND c.archived = 0 ORDER BY c.display_name`,
     ctx.studio.id,
   );
-  audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "contacts.exported", entity: "contact", diff: { rows: rows.length } });
+  await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "contacts.exported", entity: "contact", diff: { rows: rows.length } });
   return toCsv(
     ["name", "phone", "stage", "owner", "source", "interest", "tags", "whatsapp_allowed", "created_at"],
     rows.map((r) => [r.display_name, r.phone_e164, r.pipeline_stage, r.owner, r.source, r.interest, parseJson<string[]>(r.tags, []).join("; "), r.allowed === 0 ? "no" : "yes", r.created_at]),

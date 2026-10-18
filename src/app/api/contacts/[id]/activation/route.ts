@@ -1,4 +1,4 @@
 import { staffRoute, ok } from "@/server/http";
 import { createActivation } from "@/server/services/public";
 
-export const POST = staffRoute((_req, ctx, { id }) => ok(createActivation(ctx, id), undefined, 201));
+export const POST = staffRoute(async (_req, ctx, { id }) => ok(await createActivation(ctx, id), undefined, 201));

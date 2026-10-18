@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "כניסה" };
 
 export default async function LoginPage() {
-  if (!hasAnyStudio()) redirect("/setup");
+  if (!await hasAnyStudio()) redirect("/setup");
   if (await getCtx()) redirect("/");
   return (
     <div className="center-screen">

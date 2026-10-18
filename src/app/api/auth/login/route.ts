@@ -27,7 +27,7 @@ export const POST = publicRoute(async (req) => {
   if (!email || !body.password) throw new AppError("validation", "כתבו אימייל וסיסמה.");
   let result: { userId: string; studioId: string };
   try {
-    result = authenticate(email, body.password);
+    result = await authenticate(email, body.password);
   } catch (e) {
     recordFailure(`ip:${ip}`);
     recordFailure(`email:${email}`);

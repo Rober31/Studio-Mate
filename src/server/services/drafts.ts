@@ -6,7 +6,7 @@ import { assertCan, type Ctx } from "../permissions";
 import { hashObject, id, nowIso, parseJson } from "../util";
 import { waNumber } from "../phone";
 import { getContact } from "./contacts";
-import { candidatesFor, contactGuards, firstName, getSuggestion, type Facts } from "./followups";
+import { candidatesFor, contactGuards, firstName, getSuggestion, loadRuleContext, type Facts } from "./followups";
 import { membershipsForContact } from "./memberships";
 import { aiDraft, templateDraft, TEMPLATE_VERSION, type Lang, type Tone } from "./ai";
 import { localDate } from "../time";
@@ -41,22 +41,22 @@ function viewDraft(d: DraftRow): DraftView {
   return { ...d, facts: parseJson<Facts>(d.facts, { rule: "GENERAL", first_name: "", language: "he" }), warnings: parseJson<string[]>(d.warnings, []) };
 }
 
-function getDraftRow(ctx: Ctx, draftId: string): DraftRow {
-  const d = one<DraftRow>("SELECT * FROM message_drafts WHERE id = ? AND studio_id = ?", draftId, ctx.studio.id);
+async function getDraftRow(ctx: Ctx, draftId: string): Promise<DraftRow> {
+  const d = await one<DraftRow>("SELECT * FROM message_drafts WHERE id = ? AND studio_id = ?", draftId, ctx.studio.id);
   if (!d) throw notFound("הטיוטה");
-  getContact(ctx, d.contact_id); // scope check
+  await getContact(ctx, d.contact_id); // scope check
   return d;
 }
 
-export function getDraft(ctx: Ctx, draftId: string): DraftView {
-  return viewDraft(getDraftRow(ctx, draftId));
+export async function getDraft(ctx: Ctx, draftId: string): Promise<DraftView> {
+  return viewDraft(await getDraftRow(ctx, draftId));
 }
 
 /** Facts for task / general follow-ups (no rule): name, language and membership summary. */
-function basicFacts(ctx: Ctx, contactId: string, rule: "R06" | "GENERAL"): Facts {
-  const c = getContact(ctx, contactId);
+async function basicFacts(ctx: Ctx, contactId: string, rule: "R06" | "GENERAL"): Promise<Facts> {
+  const c = await getContact(ctx, contactId);
   const tz = ctx.studio.timezone;
-  const active = membershipsForContact(ctx.studio.id, contactId).find((m) => m.status === "active");
+  const active = (await membershipsForContact(ctx.studio.id, contactId)).find((m) => m.status === "active");
   const f: Facts = {
     rule: rule === "R06" ? "R06" : "GENERAL",
     first_name: firstName(c.display_name),
@@ -74,33 +74,35 @@ function basicFacts(ctx: Ctx, contactId: string, rule: "R06" | "GENERAL"): Facts
 type Source = { suggestionId?: string | null; taskId?: string | null; contactId: string };
 
 /** Recomputes the current facts for a draft source; null when the reason no longer applies. */
-function currentFacts(ctx: Ctx, src: Source): { facts: Facts; reasonCode: string } | null {
+async function currentFacts(ctx: Ctx, src: Source): Promise<{ facts: Facts; reasonCode: string } | null> {
   if (src.suggestionId) {
-    const s = getSuggestion(ctx, src.suggestionId);
+    const s = await getSuggestion(ctx, src.suggestionId);
     if (s.status !== "active" && s.status !== "snoozed") return null;
-    const c = one<{ id: string; display_name: string; preferred_language: string | null; pipeline_stage: string; interest: string | null; created_at: string }>(
+    const c = await one<{ id: string; display_name: string; preferred_language: string | null; pipeline_stage: string; interest: string | null; created_at: string }>(
       "SELECT id, display_name, preferred_language, pipeline_stage, interest, created_at FROM contacts WHERE id = ?",
       s.contact_id,
-    )!;
-    const cand = candidatesFor(ctx.studio, c).find((x) => x.eventKey === s.event_key);
+    );
+    if (!c) return null;
+    const rc = await loadRuleContext(ctx.studio, [c.id]);
+    const cand = candidatesFor(ctx.studio, c, rc).find((x) => x.eventKey === s.event_key);
     if (!cand) return null;
     return { facts: cand.facts, reasonCode: s.rule_id };
   }
   if (src.taskId) {
-    const t = one<{ status: string; reason_code: string }>("SELECT status, reason_code FROM tasks WHERE id = ? AND studio_id = ?", src.taskId, ctx.studio.id);
+    const t = await one<{ status: string; reason_code: string }>("SELECT status, reason_code FROM tasks WHERE id = ? AND studio_id = ?", src.taskId, ctx.studio.id);
     if (!t || !["open", "in_progress", "snoozed"].includes(t.status)) return null;
     const rule = (["R01", "R02", "R03", "R04", "R05", "R07"].includes(t.reason_code) ? t.reason_code : "R06") as RuleKey;
-    const f = basicFacts(ctx, src.contactId, "R06");
+    const f = await basicFacts(ctx, src.contactId, "R06");
     return { facts: { ...f, rule }, reasonCode: rule };
   }
-  return { facts: basicFacts(ctx, src.contactId, "GENERAL"), reasonCode: "GENERAL" };
+  return { facts: await basicFacts(ctx, src.contactId, "GENERAL"), reasonCode: "GENERAL" };
 }
 
-function monthlyAiUsage(studioId: string): number {
+async function monthlyAiUsage(studioId: string): Promise<number> {
   const start = new Date();
   start.setUTCDate(1);
   start.setUTCHours(0, 0, 0, 0);
-  return one<{ n: number }>("SELECT COUNT(*) AS n FROM usage_events WHERE studio_id = ? AND kind = 'ai_draft' AND created_at >= ?", studioId, start.toISOString())!.n;
+  return (await one<{ n: number }>("SELECT COUNT(*) AS n FROM usage_events WHERE studio_id = ? AND kind = 'ai_draft' AND created_at >= ?", studioId, start.toISOString()))!.n;
 }
 
 export async function prepareDraft(
@@ -108,25 +110,25 @@ export async function prepareDraft(
   input: { contact_id: string; suggestion_id?: string | null; task_id?: string | null; language?: Lang; tone?: Tone; length?: "short" | "normal"; override_reason?: string | null },
 ): Promise<DraftView> {
   assertCan(ctx, "followup.use");
-  const contact = getContact(ctx, input.contact_id);
+  const contact = await getContact(ctx, input.contact_id);
   if (input.suggestion_id) {
-    const s = getSuggestion(ctx, input.suggestion_id);
+    const s = await getSuggestion(ctx, input.suggestion_id);
     if (s.contact_id !== contact.id) throw invalid({ suggestion_id: "ההצעה לא שייכת ללקוח." });
   }
   if (input.task_id) {
-    const t = one<{ contact_id: string }>("SELECT contact_id FROM tasks WHERE id = ? AND studio_id = ?", input.task_id, ctx.studio.id);
+    const t = await one<{ contact_id: string }>("SELECT contact_id FROM tasks WHERE id = ? AND studio_id = ?", input.task_id, ctx.studio.id);
     if (!t || t.contact_id !== contact.id) throw invalid({ task_id: "המשימה לא שייכת ללקוח." });
   }
-  const guards = contactGuards(ctx.studio, contact.id);
+  const guards = await contactGuards(ctx.studio, contact.id);
   if (guards.blocked) throw new AppError("blocked", "הלקוח ביקש שלא ניצור איתו קשר. אי אפשר להכין הודעה.");
   const isMarketing = !input.task_id;
   if (isMarketing && (guards.cooldownUntil || guards.overLimit) && !input.override_reason?.trim()) {
     throw new AppError("blocked", "פנו ללקוח לאחרונה. כדי להכין הודעה בכל זאת, כתבו סיבה.", { details: { needsOverride: true, cooldownUntil: guards.cooldownUntil } });
   }
 
-  const current = currentFacts(ctx, { suggestionId: input.suggestion_id, taskId: input.task_id, contactId: contact.id });
+  const current = await currentFacts(ctx, { suggestionId: input.suggestion_id, taskId: input.task_id, contactId: contact.id });
   if (!current) {
-    if (input.suggestion_id) run("UPDATE suggestions SET status = 'superseded', status_reason = 'condition_cleared', updated_at = ? WHERE id = ?", nowIso(), input.suggestion_id);
+    if (input.suggestion_id) await run("UPDATE suggestions SET status = 'superseded', status_reason = 'condition_cleared', updated_at = ? WHERE id = ?", nowIso(), input.suggestion_id);
     throw new AppError("conflict", "הסיבה למעקב כבר לא רלוונטית (למשל המנוי חודש). רעננו את הרשימה.");
   }
   const allowedLang: Lang[] = ["he", "ar", "en"];
@@ -134,7 +136,7 @@ export async function prepareDraft(
   const facts = { ...current.facts, language: lang };
   const settings = ctx.studio.settings;
   const hasAi = ctx.studio.modules.includes("ai");
-  const overQuota = monthlyAiUsage(ctx.studio.id) >= settings.aiMonthlyQuota;
+  const overQuota = await monthlyAiUsage(ctx.studio.id) >= settings.aiMonthlyQuota;
 
   const result = !hasAi
     ? templateDraft(facts, current.reasonCode, lang, settings.signature)
@@ -163,8 +165,8 @@ export async function prepareDraft(
 
   const now = nowIso();
   const draftId = id("drf");
-  tx(() => {
-    run(
+  await tx(async () => {
+    await run(
       `INSERT INTO message_drafts (id, studio_id, contact_id, suggestion_id, task_id, reason_code, generated_text, text, language, tone, length,
          facts, facts_hash, warnings, generator, template_version, model_id, status, created_by, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'ready', ?,?,?)`,
@@ -190,7 +192,7 @@ export async function prepareDraft(
       now,
     );
     if (result.generator === "ai" || (hasAi && !overQuota)) {
-      run(
+      await run(
         "INSERT INTO usage_events (id, studio_id, kind, model, units, duration_ms, actor_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
         id("use"),
         ctx.studio.id,
@@ -203,7 +205,7 @@ export async function prepareDraft(
       );
     }
     if (input.override_reason?.trim()) {
-      run(
+      await run(
         "INSERT INTO audit_events (id, studio_id, actor_id, action, entity, entity_id, reason, created_at) VALUES (?,?,?,?,?,?,?,?)",
         id("aud"),
         ctx.studio.id,
@@ -216,18 +218,18 @@ export async function prepareDraft(
       );
     }
   });
-  return getDraft(ctx, draftId);
+  return await getDraft(ctx, draftId);
 }
 
-export function editDraft(ctx: Ctx, draftId: string, text: string, version: number): DraftView {
+export async function editDraft(ctx: Ctx, draftId: string, text: string, version: number): Promise<DraftView> {
   assertCan(ctx, "followup.use");
-  const d = getDraftRow(ctx, draftId);
+  const d = await getDraftRow(ctx, draftId);
   if (d.status === "invalidated") throw new AppError("conflict", "הטיוטה כבר לא בתוקף. הכינו הודעה חדשה.");
   if (!["ready", "edited"].includes(d.status)) throw new AppError("conflict", "ההודעה כבר נפתחה בוואטסאפ.");
   const clean = (text ?? "").trim();
   if (!clean) throw invalid({ text: "ההודעה ריקה." });
   if (clean.length > 1000) throw invalid({ text: "ההודעה ארוכה מדי." });
-  const res = run(
+  const res = await run(
     "UPDATE message_drafts SET text = ?, status = CASE WHEN ? = generated_text THEN status ELSE 'edited' END, edited_by = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
     clean,
     clean,
@@ -237,34 +239,34 @@ export function editDraft(ctx: Ctx, draftId: string, text: string, version: numb
     version,
   );
   if (res.changes !== 1) throw conflict();
-  return getDraft(ctx, draftId);
+  return await getDraft(ctx, draftId);
 }
 
-function invalidate(draftId: string, reason: string) {
-  run("UPDATE message_drafts SET status = 'invalidated', invalid_reason = ?, updated_at = ? WHERE id = ?", reason, nowIso(), draftId);
+async function invalidate(draftId: string, reason: string) {
+  await run("UPDATE message_drafts SET status = 'invalidated', invalid_reason = ?, updated_at = ? WHERE id = ?", reason, nowIso(), draftId);
 }
 
 /** Re-checks facts, permission and preferences, then returns the wa.me link (WA-01). */
-export function handoff(ctx: Ctx, draftId: string, text?: string): { url: string; phone: string; text: string; draft: DraftView } {
+export async function handoff(ctx: Ctx, draftId: string, text?: string): Promise<{ url: string; phone: string; text: string; draft: DraftView }> {
   assertCan(ctx, "followup.use");
-  const d = getDraftRow(ctx, draftId);
+  const d = await getDraftRow(ctx, draftId);
   if (d.status === "invalidated") throw new AppError("conflict", "הטיוטה כבר לא בתוקף. הכינו הודעה חדשה.", { details: { invalidReason: d.invalid_reason } });
-  const contact = getContact(ctx, d.contact_id);
-  const guards = contactGuards(ctx.studio, contact.id);
+  const contact = await getContact(ctx, d.contact_id);
+  const guards = await contactGuards(ctx.studio, contact.id);
   if (guards.blocked) {
-    invalidate(d.id, "contact_blocked");
+    await invalidate(d.id, "contact_blocked");
     throw new AppError("blocked", "הלקוח ביקש שלא ניצור איתו קשר. ההודעה בוטלה.");
   }
   if (guards.phoneInvalid || !contact.phone_e164) {
     throw new AppError("blocked", "מספר הטלפון חסר או לא תקין. תקנו אותו בתיק הלקוח ואז נסו שוב.", { details: { fixPhone: true } });
   }
-  const current = currentFacts(ctx, { suggestionId: d.suggestion_id, taskId: d.task_id, contactId: d.contact_id });
+  const current = await currentFacts(ctx, { suggestionId: d.suggestion_id, taskId: d.task_id, contactId: d.contact_id });
   if (!current) {
-    invalidate(d.id, "reason_cleared");
+    await invalidate(d.id, "reason_cleared");
     throw new AppError("conflict", "הסיבה למעקב כבר לא רלוונטית, לכן ההודעה בוטלה.", { details: { invalidReason: "reason_cleared" } });
   }
   if (hashObject(current.facts) !== d.facts_hash) {
-    invalidate(d.id, "facts_changed");
+    await invalidate(d.id, "facts_changed");
     throw new AppError("conflict", "הנתונים של הלקוח השתנו מאז שההודעה הוכנה. צריך להכין אותה מחדש.", { details: { invalidReason: "facts_changed" } });
   }
   let finalText = d.text;
@@ -273,8 +275,8 @@ export function handoff(ctx: Ctx, draftId: string, text?: string): { url: string
     finalText = text.trim().slice(0, 1000);
   }
   const now = nowIso();
-  tx(() => {
-    run(
+  await tx(async () => {
+    await run(
       "UPDATE message_drafts SET text = ?, status = CASE WHEN status IN ('ready','edited') THEN 'wa_opened' ELSE status END, edited_by = CASE WHEN ? <> text THEN ? ELSE edited_by END, version = version + 1, updated_at = ? WHERE id = ?",
       finalText,
       finalText,
@@ -282,7 +284,7 @@ export function handoff(ctx: Ctx, draftId: string, text?: string): { url: string
       now,
       d.id,
     );
-    run(
+    await run(
       "INSERT INTO interaction_events (id, studio_id, contact_id, task_id, draft_id, suggestion_id, channel, event_type, occurred_at, actor_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
       id("evt"),
       ctx.studio.id,
@@ -297,20 +299,20 @@ export function handoff(ctx: Ctx, draftId: string, text?: string): { url: string
     );
   });
   const url = `https://wa.me/${waNumber(contact.phone_e164)}?text=${encodeURIComponent(finalText)}`;
-  return { url, phone: contact.phone_e164, text: finalText, draft: getDraft(ctx, d.id) };
+  return { url, phone: contact.phone_e164, text: finalText, draft: await getDraft(ctx, d.id) };
 }
 
 /** Staff confirms they actually sent the message (manual_confirmation evidence). */
-export function markSent(ctx: Ctx, draftId: string): DraftView {
+export async function markSent(ctx: Ctx, draftId: string): Promise<DraftView> {
   assertCan(ctx, "followup.use");
-  const d = getDraftRow(ctx, draftId);
+  const d = await getDraftRow(ctx, draftId);
   if (d.status === "invalidated") throw new AppError("conflict", "הטיוטה כבר לא בתוקף.");
-  if (d.status === "marked_sent" || d.status === "outcome_recorded") return getDraft(ctx, draftId);
+  if (d.status === "marked_sent" || d.status === "outcome_recorded") return await getDraft(ctx, draftId);
   if (d.status !== "wa_opened") throw new AppError("conflict", "קודם פותחים את ההודעה בוואטסאפ.");
   const now = nowIso();
-  tx(() => {
-    run("UPDATE message_drafts SET status = 'marked_sent', version = version + 1, updated_at = ? WHERE id = ?", now, d.id);
-    run(
+  await tx(async () => {
+    await run("UPDATE message_drafts SET status = 'marked_sent', version = version + 1, updated_at = ? WHERE id = ?", now, d.id);
+    await run(
       "INSERT INTO interaction_events (id, studio_id, contact_id, task_id, draft_id, suggestion_id, channel, event_type, evidence_type, marketing, occurred_at, actor_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
       id("evt"),
       ctx.studio.id,
@@ -326,10 +328,10 @@ export function markSent(ctx: Ctx, draftId: string): DraftView {
       ctx.userId,
     );
   });
-  return getDraft(ctx, draftId);
+  return await getDraft(ctx, draftId);
 }
 
-export function draftsForContact(ctx: Ctx, contactId: string) {
-  getContact(ctx, contactId);
-  return all<DraftRow>("SELECT * FROM message_drafts WHERE contact_id = ? AND studio_id = ? ORDER BY created_at DESC LIMIT 20", contactId, ctx.studio.id).map(viewDraft);
+export async function draftsForContact(ctx: Ctx, contactId: string) {
+  await getContact(ctx, contactId);
+  return (await all<DraftRow>("SELECT * FROM message_drafts WHERE contact_id = ? AND studio_id = ? ORDER BY created_at DESC LIMIT 20", contactId, ctx.studio.id)).map(viewDraft);
 }

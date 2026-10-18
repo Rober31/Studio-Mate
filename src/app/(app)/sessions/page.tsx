@@ -20,14 +20,14 @@ export default async function SessionsPage({ searchParams }: { searchParams: Pro
   const weekStart = addLocalDays(anchor, -dow);
   const from = startOfLocalDay(weekStart, tz).toISOString();
   const to = startOfLocalDay(addLocalDays(weekStart, 7), tz).toISOString();
-  const sessions = listSessions(ctx, from, to);
+  const sessions = await listSessions(ctx, from, to);
   return (
     <SessionsView
       sessions={JSON.parse(JSON.stringify(sessions))}
       weekStart={weekStart}
       today={today}
       tz={tz}
-      staff={staffList(ctx.studio.id)}
+      staff={await staffList(ctx.studio.id)}
       canManage={can(ctx, "sessions.manage")}
       canExport={can(ctx, "export") || can(ctx, "attendance.correct")}
       range={{ from, to }}

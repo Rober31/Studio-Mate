@@ -7,7 +7,7 @@ export const metadata = { title: "חיבור הטלפון", robots: { index: fal
 
 export default async function ActivatePage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
-  const info = activationInfo(token);
+  const info = await activationInfo(token);
   if (!info) {
     return <PublicMessage icon="link" title="הקישור כבר לא בתוקף" text="ייתכן שכבר השתמשו בו או שעברו 24 שעות. בקשו קישור חדש בקבלה." />;
   }

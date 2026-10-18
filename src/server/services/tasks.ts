@@ -44,14 +44,14 @@ const SELECT = `SELECT t.id, t.contact_id, c.display_name AS contact_name, c.pho
   t.reason_code, t.title, t.status, t.due_at, t.snoozed_until, t.outcome, t.outcome_note, t.dismiss_reason, t.completed_at, t.version, t.created_at
   FROM tasks t JOIN contacts c ON c.id = t.contact_id LEFT JOIN users u ON u.id = t.assignee_id`;
 
-export function getTask(ctx: Ctx, taskId: string): TaskRow {
+export async function getTask(ctx: Ctx, taskId: string): Promise<TaskRow> {
   const scope = contactScopeSql(ctx);
-  const t = one<TaskRow>(`${SELECT} WHERE t.id = ? AND t.studio_id = ? AND ${scope.sql}`, taskId, ctx.studio.id, ...scope.params);
+  const t = await one<TaskRow>(`${SELECT} WHERE t.id = ? AND t.studio_id = ? AND ${scope.sql}`, taskId, ctx.studio.id, ...scope.params);
   if (!t) throw notFound("המשימה");
   return t;
 }
 
-export function listTasks(ctx: Ctx, view: "today" | "overdue" | "snoozed" | "upcoming" | "done", mine: boolean) {
+export async function listTasks(ctx: Ctx, view: "today" | "overdue" | "snoozed" | "upcoming" | "done", mine: boolean) {
   assertCan(ctx, "contacts.view");
   const scope = contactScopeSql(ctx);
   const tz = ctx.studio.timezone;
@@ -87,42 +87,50 @@ export function listTasks(ctx: Ctx, view: "today" | "overdue" | "snoozed" | "upc
       order = "COALESCE(t.completed_at, t.updated_at) DESC";
       break;
   }
-  return all<TaskRow>(`${SELECT} WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT 200`, ...params);
+  return await all<TaskRow>(`${SELECT} WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT 200`, ...params);
 }
 
-export function taskCounts(ctx: Ctx) {
+export async function taskCounts(ctx: Ctx) {
   const scope = contactScopeSql(ctx);
   const tz = ctx.studio.timezone;
   const today = localDate(new Date(), tz);
   const todayStart = startOfLocalDay(today, tz).toISOString();
   const tomorrowStart = startOfLocalDay(addLocalDays(today, 1), tz).toISOString();
-  const q = (cond: string, ...p: unknown[]) =>
-    one<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks t JOIN contacts c ON c.id = t.contact_id WHERE t.studio_id = ? AND c.merged_into IS NULL AND ${scope.sql} AND ${cond}`, ctx.studio.id, ...scope.params, ...p)!.n;
-  return {
-    today: q("t.status IN ('open','in_progress') AND t.due_at >= ? AND t.due_at < ?", todayStart, tomorrowStart),
-    overdue: q("t.status IN ('open','in_progress') AND t.due_at < ?", todayStart),
-    snoozed: q("t.status = 'snoozed'"),
-    upcoming: q("t.status IN ('open','in_progress') AND t.due_at >= ?", tomorrowStart),
-  };
+  const r = await one<{ today: number; overdue: number; snoozed: number; upcoming: number }>(
+    `SELECT
+       COALESCE(SUM(CASE WHEN t.status IN ('open','in_progress') AND t.due_at >= ? AND t.due_at < ? THEN 1 ELSE 0 END), 0) AS today,
+       COALESCE(SUM(CASE WHEN t.status IN ('open','in_progress') AND t.due_at < ? THEN 1 ELSE 0 END), 0) AS overdue,
+       COALESCE(SUM(CASE WHEN t.status = 'snoozed' THEN 1 ELSE 0 END), 0) AS snoozed,
+       COALESCE(SUM(CASE WHEN t.status IN ('open','in_progress') AND t.due_at >= ? THEN 1 ELSE 0 END), 0) AS upcoming
+     FROM tasks t JOIN contacts c ON c.id = t.contact_id
+     WHERE t.studio_id = ? AND c.merged_into IS NULL AND ${scope.sql}`,
+    todayStart,
+    tomorrowStart,
+    todayStart,
+    tomorrowStart,
+    ctx.studio.id,
+    ...scope.params,
+  );
+  return { today: r?.today ?? 0, overdue: r?.overdue ?? 0, snoozed: r?.snoozed ?? 0, upcoming: r?.upcoming ?? 0 };
 }
 
-export function tasksForContact(ctx: Ctx, contactId: string) {
-  getContact(ctx, contactId);
-  return all<TaskRow>(`${SELECT} WHERE t.contact_id = ? AND t.studio_id = ? ORDER BY CASE WHEN t.status IN ('open','in_progress','snoozed') THEN 0 ELSE 1 END, t.due_at DESC LIMIT 50`, contactId, ctx.studio.id);
+export async function tasksForContact(ctx: Ctx, contactId: string) {
+  await getContact(ctx, contactId);
+  return await all<TaskRow>(`${SELECT} WHERE t.contact_id = ? AND t.studio_id = ? ORDER BY CASE WHEN t.status IN ('open','in_progress','snoozed') THEN 0 ELSE 1 END, t.due_at DESC LIMIT 50`, contactId, ctx.studio.id);
 }
 
-export function createTask(ctx: Ctx, input: { contact_id?: string; title?: string; due_at?: string; assignee_id?: string | null; reason_code?: string; reason?: string }) {
+export async function createTask(ctx: Ctx, input: { contact_id?: string; title?: string; due_at?: string; assignee_id?: string | null; reason_code?: string; reason?: string }) {
   assertCan(ctx, "contacts.edit");
   if (!input.contact_id) throw invalid({ contact_id: "בחרו לקוח." });
-  const contact = getContact(ctx, input.contact_id);
+  const contact = await getContact(ctx, input.contact_id);
   if (!input.due_at || Number.isNaN(Date.parse(input.due_at))) throw invalid({ due_at: "בחרו מועד." });
   const assignee = input.assignee_id === undefined ? contact.owner_id ?? ctx.userId : input.assignee_id;
-  if (assignee && !one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1", ctx.studio.id, assignee)) {
+  if (assignee && !(await one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1", ctx.studio.id, assignee))) {
     throw invalid({ assignee_id: "האחראי שנבחר אינו בצוות." });
   }
   const now = nowIso();
   const taskId = id("tsk");
-  run(
+  await run(
     `INSERT INTO tasks (id, studio_id, contact_id, assignee_id, reason_code, title, status, due_at, created_by, created_at, updated_at)
      VALUES (?,?,?,?,?,?, 'open', ?,?,?,?)`,
     taskId,
@@ -137,9 +145,9 @@ export function createTask(ctx: Ctx, input: { contact_id?: string; title?: strin
     now,
   );
   if (input.reason?.trim()) {
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "task.override_created", entity: "task", entityId: taskId, reason: input.reason.trim() });
+    await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "task.override_created", entity: "task", entityId: taskId, reason: input.reason.trim() });
   }
-  return getTask(ctx, taskId);
+  return await getTask(ctx, taskId);
 }
 
 export type TaskPatch = {
@@ -159,53 +167,53 @@ export type TaskPatch = {
   membership_id?: string;
 };
 
-export function updateTask(ctx: Ctx, taskId: string, patch: TaskPatch) {
+export async function updateTask(ctx: Ctx, taskId: string, patch: TaskPatch) {
   assertCan(ctx, "contacts.edit");
-  const t = getTask(ctx, taskId);
+  const t = await getTask(ctx, taskId);
   if (typeof patch.version !== "number") throw invalid({ version: "חסרה גרסה." });
   if (patch.version !== t.version) {
     throw conflict("מישהו אחר עדכן את המשימה בינתיים. רעננו כדי לראות את המצב העדכני.", { current: t });
   }
   const now = nowIso();
-  const apply = (sql: string, ...params: unknown[]) => {
-    const res = run(`UPDATE tasks SET ${sql}, version = version + 1, updated_at = ? WHERE id = ? AND version = ?`, ...params, now, taskId, patch.version);
+  const apply = async (sql: string, ...params: unknown[]) => {
+    const res = await run(`UPDATE tasks SET ${sql}, version = version + 1, updated_at = ? WHERE id = ? AND version = ?`, ...params, now, taskId, patch.version);
     if (res.changes !== 1) throw conflict();
   };
   const open = ["open", "in_progress", "snoozed"].includes(t.status);
   switch (patch.action) {
     case "start":
       if (!open) throw new AppError("conflict", "המשימה כבר סגורה.");
-      apply("status = 'in_progress', assignee_id = COALESCE(assignee_id, ?)", ctx.userId);
+      await apply("status = 'in_progress', assignee_id = COALESCE(assignee_id, ?)", ctx.userId);
       break;
     case "snooze": {
       if (!open) throw new AppError("conflict", "המשימה כבר סגורה.");
       if (!patch.snoozed_until || Number.isNaN(Date.parse(patch.snoozed_until)) || patch.snoozed_until <= now) throw invalid({ snoozed_until: "בחרו תאריך ושעה עתידיים." });
       const until = new Date(patch.snoozed_until).toISOString();
-      apply("status = 'snoozed', snoozed_until = ?, snooze_reason = ?, due_at = ?", until, patch.snooze_reason?.trim() || null, until);
+      await apply("status = 'snoozed', snoozed_until = ?, snooze_reason = ?, due_at = ?", until, patch.snooze_reason?.trim() || null, until);
       break;
     }
     case "dismiss":
       if (!open) throw new AppError("conflict", "המשימה כבר סגורה.");
       if (!patch.dismiss_reason?.trim()) throw invalid({ dismiss_reason: "כתבו למה מחריגים את המשימה." });
-      apply("status = 'dismissed', dismiss_reason = ?, completed_at = ?, completed_by = ?", patch.dismiss_reason.trim(), now, ctx.userId);
+      await apply("status = 'dismissed', dismiss_reason = ?, completed_at = ?, completed_by = ?", patch.dismiss_reason.trim(), now, ctx.userId);
       break;
     case "assign":
-      if (patch.assignee_id && !one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1", ctx.studio.id, patch.assignee_id)) {
+      if (patch.assignee_id && !(await one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1", ctx.studio.id, patch.assignee_id))) {
         throw invalid({ assignee_id: "האחראי שנבחר אינו בצוות." });
       }
-      apply("assignee_id = ?", patch.assignee_id || null);
+      await apply("assignee_id = ?", patch.assignee_id || null);
       break;
     case "reopen":
       if (open) return t;
-      apply("status = 'open', completed_at = NULL, outcome = NULL, dismiss_reason = NULL");
+      await apply("status = 'open', completed_at = NULL, outcome = NULL, dismiss_reason = NULL");
       break;
     case "edit":
       if (patch.due_at && Number.isNaN(Date.parse(patch.due_at))) throw invalid({ due_at: "מועד לא תקין." });
-      apply("title = COALESCE(?, title), due_at = COALESCE(?, due_at)", patch.title?.trim() || null, patch.due_at ? new Date(patch.due_at).toISOString() : null);
+      await apply("title = COALESCE(?, title), due_at = COALESCE(?, due_at)", patch.title?.trim() || null, patch.due_at ? new Date(patch.due_at).toISOString() : null);
       break;
     case "complete":
       if (!open) throw new AppError("conflict", "המשימה כבר סגורה.");
-      recordOutcome(ctx, {
+      await recordOutcome(ctx, {
         contact_id: t.contact_id,
         task_id: t.id,
         task_version: patch.version,
@@ -218,7 +226,7 @@ export function updateTask(ctx: Ctx, taskId: string, patch: TaskPatch) {
       });
       break;
   }
-  return getTask(ctx, taskId);
+  return await getTask(ctx, taskId);
 }
 
 const CONTACT_OUTCOMES = new Set<Outcome>(["interested", "needs_time", "asked_details", "wants_trial", "renewed", "not_interested", "stop_contact"]);
@@ -227,7 +235,7 @@ const CONTACT_OUTCOMES = new Set<Outcome>(["interested", "needs_time", "asked_de
  * Records the result of a follow-up and closes the loop: suggestion, draft,
  * task, stage and preferences (FUP-03, AC-05, AC-10).
  */
-export function recordOutcome(
+export async function recordOutcome(
   ctx: Ctx,
   input: {
     contact_id: string;
@@ -245,13 +253,13 @@ export function recordOutcome(
   },
 ) {
   assertCan(ctx, "contacts.edit");
-  const contact = getContact(ctx, input.contact_id);
+  const contact = await getContact(ctx, input.contact_id);
   const fields: Record<string, string> = {};
   if (!input.outcome || !OUTCOMES.includes(input.outcome)) fields.outcome = "בחרו מה קרה.";
   const channel = ["whatsapp", "call", "in_person", "none", "other"].includes(input.channel ?? "") ? input.channel! : "whatsapp";
   if (input.outcome === "renewed") {
     const hasMembership = input.membership_id
-      ? one("SELECT 1 FROM memberships WHERE id = ? AND contact_id = ? AND studio_id = ? AND cancelled_at IS NULL", input.membership_id, contact.id, ctx.studio.id)
+      ? await one("SELECT 1 FROM memberships WHERE id = ? AND contact_id = ? AND studio_id = ? AND cancelled_at IS NULL", input.membership_id, contact.id, ctx.studio.id)
       : null;
     if (!hasMembership && !input.renewal_reference?.trim()) {
       fields.renewal_reference = "כדי לסמן 'חידש' צריך מנוי מתועד או אסמכתה (למשל מספר קבלה).";
@@ -264,14 +272,14 @@ export function recordOutcome(
 
   let draft: { id: string; suggestion_id: string | null; task_id: string | null; status: string } | undefined;
   if (input.draft_id) {
-    draft = one("SELECT id, suggestion_id, task_id, status FROM message_drafts WHERE id = ? AND studio_id = ? AND contact_id = ?", input.draft_id, ctx.studio.id, contact.id);
+    draft = await one("SELECT id, suggestion_id, task_id, status FROM message_drafts WHERE id = ? AND studio_id = ? AND contact_id = ?", input.draft_id, ctx.studio.id, contact.id);
     if (!draft) throw invalid({ draft_id: "הטיוטה לא נמצאה." });
   }
   const suggestionId = input.suggestion_id ?? draft?.suggestion_id ?? null;
   const taskId = input.task_id ?? draft?.task_id ?? null;
 
-  tx(() => {
-    run(
+  await tx(async () => {
+    await run(
       `INSERT INTO interaction_events (id, studio_id, contact_id, task_id, draft_id, suggestion_id, channel, event_type, evidence_type, outcome, note, marketing, occurred_at, actor_id)
        VALUES (?,?,?,?,?,?,?, 'outcome_recorded', 'staff_entry', ?,?,?,?,?)`,
       id("evt"),
@@ -288,12 +296,12 @@ export function recordOutcome(
       now,
       ctx.userId,
     );
-    if (draft) run("UPDATE message_drafts SET status = 'outcome_recorded', version = version + 1, updated_at = ? WHERE id = ? AND status <> 'invalidated'", now, draft.id);
+    if (draft) await run("UPDATE message_drafts SET status = 'outcome_recorded', version = version + 1, updated_at = ? WHERE id = ? AND status <> 'invalidated'", now, draft.id);
     if (suggestionId) {
-      run("UPDATE suggestions SET status = 'completed', status_reason = ?, updated_at = ? WHERE id = ? AND studio_id = ? AND status IN ('active','snoozed')", outcome, now, suggestionId, ctx.studio.id);
+      await run("UPDATE suggestions SET status = 'completed', status_reason = ?, updated_at = ? WHERE id = ? AND studio_id = ? AND status IN ('active','snoozed')", outcome, now, suggestionId, ctx.studio.id);
     }
     if (taskId) {
-      const res = run(
+      const res = await run(
         `UPDATE tasks SET status = 'completed', outcome = ?, outcome_note = ?, outcome_channel = ?, completed_at = ?, completed_by = ?, version = version + 1, updated_at = ?
           WHERE id = ? AND studio_id = ? AND status IN ('open','in_progress','snoozed') ${input.task_version !== undefined ? "AND version = ?" : ""}`,
         outcome,
@@ -323,8 +331,8 @@ export function recordOutcome(
       stageReason = input.renewal_reference?.trim() || "מנוי מתועד";
     }
     if (nextStage && nextStage !== contact.pipeline_stage) {
-      run("UPDATE contacts SET pipeline_stage = ?, stage_reason = ?, version = version + 1, updated_at = ? WHERE id = ?", nextStage, stageReason, now, contact.id);
-      run(
+      await run("UPDATE contacts SET pipeline_stage = ?, stage_reason = ?, version = version + 1, updated_at = ? WHERE id = ?", nextStage, stageReason, now, contact.id);
+      await run(
         "INSERT INTO stage_changes (id, studio_id, contact_id, from_stage, to_stage, reason, actor_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
         id("stg"),
         ctx.studio.id,
@@ -337,7 +345,7 @@ export function recordOutcome(
       );
     }
     if (outcome === "renewed") {
-      run(
+      await run(
         "INSERT INTO interaction_events (id, studio_id, contact_id, channel, event_type, evidence_type, note, occurred_at, actor_id) VALUES (?,?,?,?,?,?,?,?,?)",
         id("evt"),
         ctx.studio.id,
@@ -349,7 +357,7 @@ export function recordOutcome(
         now,
         ctx.userId,
       );
-      run(
+      await run(
         "UPDATE suggestions SET status = 'superseded', status_reason = 'renewed', updated_at = ? WHERE contact_id = ? AND studio_id = ? AND rule_id IN ('R03','R04','R07') AND status IN ('active','snoozed')",
         now,
         contact.id,
@@ -358,18 +366,18 @@ export function recordOutcome(
     }
     // Stop request updates the preference immediately (AC-06).
     if (outcome === "stop_contact") {
-      setPreferenceRaw(ctx.studio.id, contact.id, false, "ביקש להפסיק קשר", "outcome", ctx.userId, null);
-      invalidateDrafts(ctx.studio.id, contact.id, "contact_blocked");
-      run(
+      await setPreferenceRaw(ctx.studio.id, contact.id, false, "ביקש להפסיק קשר", "outcome", ctx.userId, null);
+      await invalidateDrafts(ctx.studio.id, contact.id, "contact_blocked");
+      await run(
         "UPDATE suggestions SET status = 'dismissed', status_reason = 'stop_contact', updated_at = ? WHERE contact_id = ? AND studio_id = ? AND status IN ('active','snoozed')",
         now,
         contact.id,
         ctx.studio.id,
       );
-      audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "preference.blocked", entity: "contact", entityId: contact.id, reason: "stop_contact outcome" });
+      await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "preference.blocked", entity: "contact", entityId: contact.id, reason: "stop_contact outcome" });
     }
     if (input.follow_up && outcome !== "stop_contact") {
-      run(
+      await run(
         `INSERT INTO tasks (id, studio_id, contact_id, assignee_id, reason_code, title, status, due_at, created_by, created_at, updated_at)
          VALUES (?,?,?,?, 'R06', ?, 'open', ?,?,?,?)`,
         id("tsk"),

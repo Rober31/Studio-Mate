@@ -11,11 +11,11 @@ export const metadata = { title: "היום" };
 export default async function TodayPage() {
   const ctx = await requireCtx();
   if (!can(ctx, "contacts.view")) redirect("/");
-  const data = todayList(ctx);
+  const [data, staff] = await Promise.all([todayList(ctx), staffList(ctx.studio.id)]);
   return (
     <TodayView
       initial={JSON.parse(JSON.stringify(data))}
-      staff={staffList(ctx.studio.id)}
+      staff={staff}
       me={{ id: ctx.userId, name: ctx.name }}
       tz={ctx.studio.timezone}
       canFollowup={can(ctx, "followup.use")}

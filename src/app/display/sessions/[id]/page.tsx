@@ -14,7 +14,7 @@ export default async function DisplayPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   let session;
   try {
-    session = getSession(ctx, id);
+    session = await getSession(ctx, id);
   } catch {
     notFound();
   }

@@ -1,8 +1,8 @@
 import { staffRoute } from "@/server/http";
 import { exportContactsCsv } from "@/server/services/imports";
 
-export const GET = staffRoute((_req, ctx) => {
-  const csv = exportContactsCsv(ctx);
+export const GET = staffRoute(async (_req, ctx) => {
+  const csv = await exportContactsCsv(ctx);
   const date = new Date().toISOString().slice(0, 10);
   return new Response(csv, {
     headers: {

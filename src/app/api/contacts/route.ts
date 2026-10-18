@@ -2,7 +2,7 @@ import { staffRoute, ok, readJson } from "@/server/http";
 import { createContact, listContacts, type ContactFilters, type ContactInput } from "@/server/services/contacts";
 import { markEvaluationStale } from "@/server/services/followups";
 
-export const GET = staffRoute((req, ctx) => {
+export const GET = staffRoute(async (req, ctx) => {
   const sp = req.nextUrl.searchParams;
   const f: ContactFilters = {
     q: sp.get("q") || undefined,
@@ -16,13 +16,13 @@ export const GET = staffRoute((req, ctx) => {
     page: Number(sp.get("page")) || 1,
     pageSize: Number(sp.get("pageSize")) || 30,
   };
-  const r = listContacts(ctx, f);
+  const r = await listContacts(ctx, f);
   return ok(r.items, { total: r.total, page: r.page, pageSize: r.pageSize });
 });
 
 export const POST = staffRoute(async (req, ctx) => {
   const body = await readJson<ContactInput>(req);
-  const c = createContact(ctx, body);
-  markEvaluationStale(ctx.studio.id);
+  const c = await createContact(ctx, body);
+  await markEvaluationStale(ctx.studio.id);
   return ok(c, undefined, 201);
 });

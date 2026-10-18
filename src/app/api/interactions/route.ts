@@ -19,7 +19,7 @@ export const POST = staffRoute(async (req, ctx) => {
     lost_reason?: string;
   }>(req);
   if (!body.contact_id) throw invalid({ contact_id: "חסר לקוח." });
-  recordOutcome(ctx, { ...body, contact_id: body.contact_id });
-  markEvaluationStale(ctx.studio.id);
+  await recordOutcome(ctx, { ...body, contact_id: body.contact_id });
+  await markEvaluationStale(ctx.studio.id);
   return ok({ ok: true }, undefined, 201);
 });

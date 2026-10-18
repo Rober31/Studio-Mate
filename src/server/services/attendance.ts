@@ -430,7 +430,8 @@ export async function reverseAttendance(ctx: Ctx, attendanceId: string, reason: 
   await getSession(ctx, a.session_id);
   if (a.status === "reversed") return { status: "already_reversed" as const };
   if (version !== undefined && version !== a.version) throw conflict();
-  await tx(() => reverseRaw(ctx.studio.id, attendanceId, reason.trim(), ctx.userId));
+  const r = await tx(() => reverseRaw(ctx.studio.id, attendanceId, reason.trim(), ctx.userId));
+  if (r.alreadyReversed) return { status: "already_reversed" as const };
   await markEvaluationStale(ctx.studio.id);
   return { status: "reversed" as const };
 }

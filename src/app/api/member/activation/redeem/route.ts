@@ -7,7 +7,7 @@ import { AppError } from "@/server/errors";
 export const POST = publicRoute(async (req) => {
   if (!rateLimit(`activate:${clientIp(req)}`, 20, 15 * 60_000)) throw new AppError("rate_limited", "יותר מדי ניסיונות. נסו שוב מאוחר יותר.");
   const body = await readJson<{ token?: string }>(req);
-  const { sessionToken, expires } = redeemActivation(body.token ?? "");
+  const { sessionToken, expires } = await redeemActivation(body.token ?? "");
   const jar = await cookies();
   jar.set(MEMBER_COOKIE, sessionToken, {
     httpOnly: true,

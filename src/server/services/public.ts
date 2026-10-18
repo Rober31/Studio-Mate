@@ -26,7 +26,7 @@ export type RegistrationInput = {
  * Accepts a registration request. Always answers with the same generic receipt,
  * never revealing whether the phone already belongs to a customer (AC-Q01).
  */
-export async function submitRegistration(studio: Studio, input: RegistrationInput): { status: "received" } {
+export async function submitRegistration(studio: Studio, input: RegistrationInput): Promise<{ status: "received" }> {
   if (!studio.modules.includes("qr")) throw notFound("הדף");
   const fields: Record<string, string> = {};
   const name = (input.name ?? "").trim().replace(/\s+/g, " ");
@@ -164,8 +164,8 @@ export async function listRegistrations(ctx: Ctx, status: "new" | "all") {
   );
 }
 
-export async function newRegistrationsCount(studioId: string): number {
-  return await one<{ n: number }>("SELECT COUNT(*) AS n FROM registrations WHERE studio_id = ? AND status = 'new'", studioId)!.n;
+export async function newRegistrationsCount(studioId: string): Promise<number> {
+  return (await one<{ n: number }>("SELECT COUNT(*) AS n FROM registrations WHERE studio_id = ? AND status = 'new'", studioId))!.n;
 }
 
 export async function reviewRegistration(ctx: Ctx, registrationId: string, decision: "reviewed" | "rejected" | null, ownerId?: string | null) {
@@ -230,7 +230,7 @@ export async function activationInfo(rawToken: string) {
 }
 
 /** Redeems a one-time activation link and returns a raw member-session token. */
-export async function redeemActivation(rawToken: string): { sessionToken: string; expires: string; studioId: string } {
+export async function redeemActivation(rawToken: string): Promise<{ sessionToken: string; expires: string; studioId: string }> {
   if (!rawToken || rawToken.length > 100) throw new AppError("validation", "הקישור אינו תקין.");
   return await tx(async () => {
     const a = await one<{ id: string; studio_id: string; contact_id: string; expires_at: string; used_at: string | null; revoked_at: string | null }>(

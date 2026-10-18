@@ -8,15 +8,27 @@ import { SCHEMA_SQL } from "./schema";
 // (TURSO_DATABASE_URL + TURSO_AUTH_TOKEN). All access is async; `tx()` routes
 // every query made inside it to the same write transaction via AsyncLocalStorage.
 
-type State = { client: Client; ready: Promise<void>; local: boolean };
+type State = { client: Client; ready: Promise<void>; local: boolean; demo: boolean };
 const g = globalThis as unknown as { __smDb?: State; __smQueries?: number };
 const txStore = new AsyncLocalStorage<Transaction>();
+// Set while the schema/demo initialization itself runs queries, so they don't wait on `ready`.
+const initStore = new AsyncLocalStorage<boolean>();
+
+async function whenReady(s: State) {
+  if (!initStore.getStore()) await s.ready;
+}
+
+/** Demo mode: a throwaway database in /tmp, filled with sample data on first use (no persistence). */
+export function isDemo(): boolean {
+  return process.env.STUDIOMATE_DEMO === "1" && !(process.env.TURSO_DATABASE_URL || process.env.DATABASE_URL);
+}
 
 function resolveUrl(): { url: string; authToken?: string; local: boolean } {
   const remote = process.env.TURSO_DATABASE_URL || process.env.DATABASE_URL;
   if (remote) return { url: remote, authToken: process.env.TURSO_AUTH_TOKEN || process.env.DATABASE_AUTH_TOKEN, local: remote.startsWith("file:") };
+  if (isDemo() && process.env.VERCEL) return { url: "file:/tmp/studiomate-demo.db", local: true };
   if (process.env.VERCEL) {
-    throw new Error("No database configured. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the Vercel project settings.");
+    throw new Error("No database configured. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the Vercel project settings (or STUDIOMATE_DEMO=1 for a throwaway demo).");
   }
   const file = process.env.DATABASE_PATH || path.join(process.cwd(), "data", "studiomate.db");
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -27,15 +39,23 @@ function state(): State {
   if (!g.__smDb) {
     const { url, authToken, local } = resolveUrl();
     const client = createClient({ url, authToken, intMode: "number" });
+    const demo = isDemo();
     const ready = (async () => {
       if (local) await client.execute("PRAGMA journal_mode = WAL");
       await client.executeMultiple(SCHEMA_SQL);
+      if (demo) {
+        const has = await client.execute("SELECT 1 FROM studios LIMIT 1");
+        if (!has.rows.length) {
+          const { seedDemo } = await import("./demo");
+          await initStore.run(true, () => seedDemo());
+        }
+      }
     })();
     ready.catch(() => {
       // Allow a retry on the next request if initialization failed.
       if (g.__smDb?.client === client) g.__smDb = undefined;
     });
-    g.__smDb = { client, ready, local };
+    g.__smDb = { client, ready, local, demo };
   }
   return g.__smDb;
 }
@@ -74,7 +94,7 @@ async function execute(sql: string, params: unknown[]): Promise<ResultSet> {
   const stmt = { sql, args: args(params) };
   if (t) return t.execute(stmt);
   const s = state();
-  await s.ready;
+  await whenReady(s);
   for (let attempt = 0; ; attempt++) {
     try {
       return await s.client.execute(stmt);
@@ -109,7 +129,7 @@ export async function batch(stmts: [string, ...unknown[]][]): Promise<{ changes:
   const t = txStore.getStore();
   if (t) return (await t.batch(list)).map((r) => ({ changes: r.rowsAffected }));
   const s = state();
-  await s.ready;
+  await whenReady(s);
   for (let attempt = 0; ; attempt++) {
     try {
       return (await s.client.batch(list, "write")).map((r) => ({ changes: r.rowsAffected }));
@@ -124,7 +144,7 @@ export async function batch(stmts: [string, ...unknown[]][]): Promise<{ changes:
 export async function tx<T>(fn: () => Promise<T>): Promise<T> {
   if (txStore.getStore()) return fn();
   const s = state();
-  await s.ready;
+  await whenReady(s);
   for (let attempt = 0; ; attempt++) {
     let t: Transaction | undefined;
     try {

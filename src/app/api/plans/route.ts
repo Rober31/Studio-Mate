@@ -3,13 +3,13 @@ import { listPlans, savePlan, type PlanType } from "@/server/services/membership
 import { assertCan } from "@/server/permissions";
 import { one } from "@/server/db";
 
-export const GET = staffRoute((req, ctx) => {
+export const GET = staffRoute(async (req, ctx) => {
   assertCan(ctx, "memberships.view");
-  return ok(listPlans(ctx.studio.id, req.nextUrl.searchParams.get("all") === "1"));
+  return ok(await listPlans(ctx.studio.id, req.nextUrl.searchParams.get("all") === "1"));
 });
 
 export const POST = staffRoute(async (req, ctx) => {
   const b = await readJson<{ name?: string; type?: PlanType; sessions_granted?: number | null; validity_days?: number | null; price?: string | null }>(req);
-  const planId = savePlan(ctx, b);
-  return ok(one("SELECT * FROM plans WHERE id = ?", planId), undefined, 201);
+  const planId = await savePlan(ctx, b);
+  return ok(await one("SELECT * FROM plans WHERE id = ?", planId), undefined, 201);
 });

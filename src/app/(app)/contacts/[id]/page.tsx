@@ -18,7 +18,7 @@ export async function generateMetadata({ params }: { params: Promise<{ id: strin
   const { id } = await params;
   const ctx = await requireCtx();
   try {
-    return { title: getContact(ctx, id).display_name };
+    return { title: (await getContact(ctx, id)).display_name };
   } catch {
     return { title: "לקוח" };
   }
@@ -31,34 +31,34 @@ export default async function ContactPage({ params, searchParams }: { params: Pr
   const sp = await searchParams;
   let contact;
   try {
-    contact = getContact(ctx, id);
+    contact = await getContact(ctx, id);
   } catch (e) {
     if (e instanceof AppError && e.code === "not_found") notFound();
     throw e;
   }
   if (contact.merged_into) redirect(`/contacts/${contact.merged_into}`);
   const tz = ctx.studio.timezone;
-  const memberships = can(ctx, "memberships.view")
-    ? membershipsForContact(ctx.studio.id, id).map((m) => ({ ...m, ...membershipLocalDates(m, tz) }))
-    : [];
-  const suggestions = suggestionsForContact(ctx, id).map((s) => ({ ...s, facts: parseJson<Record<string, unknown>>(s.facts, {}) }));
-  const data = {
-    contact,
-    notes: listNotes(ctx, id),
-    timeline: contactTimeline(ctx, id),
-    memberships,
-    attendance: attendanceForContact(ctx.studio.id, id),
-    tasks: tasksForContact(ctx, id),
-    drafts: can(ctx, "followup.use") ? draftsForContact(ctx, id) : [],
-    suggestions,
-    guards: contactGuards(ctx.studio, id),
-    devices: hasModule(ctx, "qr") ? memberDevices(ctx, id) : [],
-  };
+  // Independent reads run in parallel (each is a network round trip in production).
+  const [membershipRows, suggestionRows, notes, timeline, attendance, tasks, drafts, guards, devices, staff] = await Promise.all([
+    can(ctx, "memberships.view") ? membershipsForContact(ctx.studio.id, id) : Promise.resolve([]),
+    suggestionsForContact(ctx, id),
+    listNotes(ctx, id),
+    contactTimeline(ctx, id),
+    attendanceForContact(ctx.studio.id, id),
+    tasksForContact(ctx, id),
+    can(ctx, "followup.use") ? draftsForContact(ctx, id) : Promise.resolve([]),
+    contactGuards(ctx.studio, id),
+    hasModule(ctx, "qr") ? memberDevices(ctx, id) : Promise.resolve([]),
+    staffList(ctx.studio.id),
+  ]);
+  const memberships = membershipRows.map((m) => ({ ...m, ...membershipLocalDates(m, tz) }));
+  const suggestions = suggestionRows.map((s) => ({ ...s, facts: parseJson<Record<string, unknown>>(s.facts, {}) }));
+  const data = { contact, notes, timeline, memberships, attendance, tasks, drafts, suggestions, guards, devices };
   return (
     <ContactProfile
       key={`${contact.id}:${contact.version}`}
       data={JSON.parse(JSON.stringify(data))}
-      staff={staffList(ctx.studio.id)}
+      staff={staff}
       tz={tz}
       perms={{
         edit: can(ctx, "contacts.edit"),

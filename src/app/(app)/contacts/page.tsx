@@ -27,14 +27,19 @@ export default async function ContactsPage({ searchParams }: { searchParams: Pro
     page: Number(s("page")) || 1,
     pageSize: 30,
   };
-  const list = view === "list" ? listContacts(ctx, filters) : null;
-  const board =
+  const [list, board, staff, tags] = await Promise.all([
+    view === "list" ? listContacts(ctx, filters) : Promise.resolve(null),
     view === "board"
-      ? STAGES.map((stage) => {
-          const r = listContacts(ctx, { ...filters, stage, page: 1, pageSize: 50 });
-          return { stage, items: r.items, total: r.total };
-        })
-      : null;
+      ? Promise.all(
+          STAGES.map(async (stage) => {
+            const r = await listContacts(ctx, { ...filters, stage, page: 1, pageSize: 50 });
+            return { stage, items: r.items, total: r.total };
+          }),
+        )
+      : Promise.resolve(null),
+    staffList(ctx.studio.id),
+    allTags(ctx.studio.id),
+  ]);
   return (
     <ContactsView
       view={view}
@@ -51,8 +56,8 @@ export default async function ContactsPage({ searchParams }: { searchParams: Pro
       }}
       list={list ? JSON.parse(JSON.stringify(list)) : null}
       board={board ? JSON.parse(JSON.stringify(board)) : null}
-      staff={staffList(ctx.studio.id)}
-      tags={allTags(ctx.studio.id)}
+      staff={staff}
+      tags={tags}
       me={ctx.userId}
       canEdit={can(ctx, "contacts.edit")}
       canImport={can(ctx, "imports")}

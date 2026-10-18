@@ -10,5 +10,5 @@ export const metadata = { title: "דוחות" };
 export default async function ReportsPage() {
   const ctx = await requireCtx();
   if (!can(ctx, "reports")) redirect("/");
-  return <ReportsView initial={JSON.parse(JSON.stringify(reportSummary(ctx, 30)))} tz={ctx.studio.timezone} hasAi={ctx.studio.modules.includes("ai")} />;
+  return <ReportsView initial={JSON.parse(JSON.stringify(await reportSummary(ctx, 30)))} tz={ctx.studio.timezone} hasAi={ctx.studio.modules.includes("ai")} />;
 }

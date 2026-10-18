@@ -11,10 +11,10 @@ export const metadata = { title: "רישום נוכחות", robots: { index: fal
 export default async function CheckinPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ t?: string }> }) {
   const { slug } = await params;
   const { t } = await searchParams;
-  const studio = getStudioBySlug(slug);
+  const studio = await getStudioBySlug(slug);
   if (!studio || !studio.modules.includes("qr")) notFound();
   const jar = await cookies();
-  const member = memberFromToken(jar.get(MEMBER_COOKIE)?.value, studio.id);
+  const member = await memberFromToken(jar.get(MEMBER_COOKIE)?.value, studio.id);
   if (!t) {
     return <PublicMessage studioName={studio.name} icon="qr" title="סרקו את הקוד שעל המסך" text="הקוד לרישום נוכחות מוצג בכניסה לסטודיו ומתחלף כל דקה." />;
   }

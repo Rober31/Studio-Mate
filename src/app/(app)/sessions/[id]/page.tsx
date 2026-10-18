@@ -14,16 +14,16 @@ export default async function SessionPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   let session;
   try {
-    session = getSession(ctx, id);
+    session = await getSession(ctx, id);
   } catch {
     notFound();
   }
   return (
     <SessionDetail
-      initial={JSON.parse(JSON.stringify({ session, roster: roster(ctx, id) }))}
+      initial={JSON.parse(JSON.stringify({ session, roster: await roster(ctx, id) }))}
       window={checkinWindow(ctx.studio, session)}
       tz={ctx.studio.timezone}
-      staff={staffList(ctx.studio.id)}
+      staff={await staffList(ctx.studio.id)}
       perms={{
         manage: can(ctx, "sessions.manage"),
         correct: can(ctx, "attendance.correct"),

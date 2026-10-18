@@ -7,8 +7,7 @@ export const dynamic = "force-dynamic";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const ctx = await requireCtx();
-  const nav = buildNav(ctx);
-  const studios = userStudios(ctx.userId);
+  const [nav, studios] = await Promise.all([buildNav(ctx), userStudios(ctx.userId)]);
   return (
     <AppShell
       nav={nav}

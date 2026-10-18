@@ -7,7 +7,7 @@ import { AppError } from "@/server/errors";
 export const POST = publicRoute(async (req) => {
   if (!rateLimit(`invite:${clientIp(req)}`, 15, 15 * 60_000)) throw new AppError("rate_limited", "יותר מדי ניסיונות.");
   const body = await readJson<{ token?: string; name?: string; password?: string }>(req);
-  const { userId, studioId } = acceptInvite(body.token ?? "", body);
+  const { userId, studioId } = await acceptInvite(body.token ?? "", body);
   await createSession(userId, studioId);
   return ok({ ok: true });
 });

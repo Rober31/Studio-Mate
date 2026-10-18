@@ -1,4 +1,4 @@
-import { all, one, run, tx } from "../db";
+import { all, batch, one, run, tx } from "../db";
 import { AppError, conflict, invalid, notFound } from "../errors";
 import { normalizePhone } from "../phone";
 import { assertCan, contactScopeSql, type Ctx } from "../permissions";
@@ -248,7 +248,7 @@ export async function createContact(ctx: Ctx, input: ContactInput, opts: { sourc
       ctx.userId,
       now,
     );
-    if (input.note?.trim()) addNoteRaw(ctx.studio.id, contactId, input.note.trim(), ctx.userId, false);
+    if (input.note?.trim()) await addNoteRaw(ctx.studio.id, contactId, input.note.trim(), ctx.userId, false);
   });
   return await getContact(ctx, contactId);
 }
@@ -407,7 +407,7 @@ export async function setContactPreference(
   assertCan(ctx, "contacts.edit");
   await getContact(ctx, contactId);
   await setPreferenceRaw(ctx.studio.id, contactId, allowed, reason, source, ctx.userId, null);
-  if (!allowed) invalidateDrafts(ctx.studio.id, contactId, "contact_blocked");
+  if (!allowed) await invalidateDrafts(ctx.studio.id, contactId, "contact_blocked");
   await audit({
     studioId: ctx.studio.id,
     actorId: ctx.userId,
@@ -539,9 +539,11 @@ export async function mergeContacts(
   const phoneFrom = choose.phone === "drop" ? drop : keep;
   const owner = choose.owner === "drop" ? drop.owner_id : keep.owner_id;
   await tx(async () => {
-    for (const table of ["tasks", "notes", "memberships", "interaction_events", "suggestions", "message_drafts", "registrations", "member_activations", "member_sessions", "stage_changes", "consent_events"]) {
-      await run(`UPDATE ${table} SET contact_id = ? WHERE contact_id = ? AND studio_id = ?`, keepId, dropId, sid);
-    }
+    await batch(
+      ["tasks", "notes", "memberships", "interaction_events", "suggestions", "message_drafts", "registrations", "member_activations", "member_sessions", "stage_changes", "consent_events"].map(
+        (table) => [`UPDATE ${table} SET contact_id = ? WHERE contact_id = ? AND studio_id = ?`, keepId, dropId, sid] as [string, ...unknown[]],
+      ),
+    );
     // Attendance is unique per person+session: keep the existing row on conflict.
     await run(
       "UPDATE attendance SET contact_id = ? WHERE contact_id = ? AND studio_id = ? AND session_id NOT IN (SELECT session_id FROM attendance WHERE contact_id = ?)",
@@ -591,8 +593,10 @@ export async function staffList(studioId: string) {
 }
 
 export async function allTags(studioId: string): Promise<string[]> {
-  return await all<{ value: string }>(
-    "SELECT DISTINCT json_each.value AS value FROM contacts, json_each(contacts.tags) WHERE contacts.studio_id = ? AND contacts.merged_into IS NULL ORDER BY value",
-    studioId,
+  return (
+    await all<{ value: string }>(
+      "SELECT DISTINCT json_each.value AS value FROM contacts, json_each(contacts.tags) WHERE contacts.studio_id = ? AND contacts.merged_into IS NULL ORDER BY value",
+      studioId,
+    )
   ).map((r) => r.value);
 }

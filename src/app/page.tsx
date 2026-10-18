@@ -6,7 +6,7 @@ import { hasAnyStudio } from "@/server/services/team";
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  if (!hasAnyStudio()) redirect("/setup");
+  if (!await hasAnyStudio()) redirect("/setup");
   const ctx = await getCtx();
   redirect(ctx ? homePath(ctx) : "/login");
 }

@@ -2,9 +2,9 @@ import { staffRoute, ok, readJson, withIdempotency } from "@/server/http";
 import { createMembership, listMemberships } from "@/server/services/memberships";
 import { assertCan } from "@/server/permissions";
 
-export const GET = staffRoute((req, ctx) => {
+export const GET = staffRoute(async (req, ctx) => {
   const sp = req.nextUrl.searchParams;
-  const res = listMemberships(ctx, {
+  const res = await listMemberships(ctx, {
     status: sp.get("status") || undefined,
     q: sp.get("q") || undefined,
     plan: sp.get("plan") || undefined,
@@ -16,6 +16,6 @@ export const GET = staffRoute((req, ctx) => {
 export const POST = staffRoute(async (req, ctx) => {
   assertCan(ctx, "memberships.manage");
   const body = await readJson<{ contact_id?: string; plan_id?: string; start_date?: string; end_date?: string | null; sessions?: number | null; reference?: string | null; renewed_from?: string | null }>(req);
-  const result = withIdempotency(ctx.studio.id, "membership", req.headers.get("idempotency-key"), body, () => ({ status: 201, data: createMembership(ctx, body) }));
+  const result = await withIdempotency(ctx.studio.id, "membership", req.headers.get("idempotency-key"), body, async () => ({ status: 201, data: await createMembership(ctx, body) }));
   return ok(result.data, { replayed: result.replayed }, result.status);
 });
