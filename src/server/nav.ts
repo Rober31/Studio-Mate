@@ -1,6 +1,6 @@
 import { can, hasModule, type Ctx } from "./permissions";
 import { one } from "./db";
-import { nowIso } from "./util";
+import { localDate, startOfLocalDay } from "./time";
 
 export type NavItem = { href: string; label: string; icon: string; count?: number; primary?: boolean; section?: string };
 
@@ -11,7 +11,7 @@ export function buildNav(ctx: Ctx): NavItem[] {
     const overdue = one<{ n: number }>(
       "SELECT COUNT(*) AS n FROM tasks t JOIN contacts c ON c.id = t.contact_id WHERE t.studio_id = ? AND t.status IN ('open','in_progress') AND t.due_at < ? AND c.merged_into IS NULL",
       sid,
-      nowIso(),
+      startOfLocalDay(localDate(new Date(), ctx.studio.timezone), ctx.studio.timezone).toISOString(),
     )!.n;
     items.push({ href: "/today", label: "היום", icon: "today", primary: true });
     items.push({ href: "/contacts", label: "לקוחות", icon: "people", primary: true });
