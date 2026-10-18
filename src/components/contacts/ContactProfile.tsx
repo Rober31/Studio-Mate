@@ -122,7 +122,7 @@ export function ContactProfile({ data, staff, tz, perms, initialTab, openEdit }:
     { value: "activity", label: "יומן פעילות" },
   ];
   const [tab, setTab] = useState<TabKey>(tabs.some((t) => t.value === initialTab) ? (initialTab as TabKey) : "summary");
-  const [editOpen, setEditOpen] = useState(openEdit);
+  const [editOpen, setEditOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
   const [composer, setComposer] = useState<ComposerTarget | null>(null);
   const [newMembership, setNewMembership] = useState<{ renewFrom: string | null } | null>(null);
@@ -143,6 +143,7 @@ export function ContactProfile({ data, staff, tz, perms, initialTab, openEdit }:
 
   useEffect(() => {
     if (openEdit) {
+      setEditOpen(true);
       const sp = new URLSearchParams(window.location.search);
       sp.delete("edit");
       window.history.replaceState(null, "", sp.toString() ? `${pathname}?${sp}` : pathname);

@@ -65,7 +65,11 @@ export function ContactsView({
   const pathname = usePathname();
   const [pending, startTransition] = useTransition();
   const [q, setQ] = useState(filters.q);
-  const [newOpen, setNewOpen] = useState(openNew);
+  const [newOpen, setNewOpen] = useState(false);
+  // Open after hydration: sheets render through a client-only portal.
+  useEffect(() => {
+    if (openNew) setNewOpen(true);
+  }, [openNew]);
   const first = useRef(true);
 
   const push = (patch: Partial<Filters> & { view?: string }) => {

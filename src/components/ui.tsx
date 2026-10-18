@@ -289,6 +289,13 @@ export function SuccessCheck({ size = 76 }: { size?: number }) {
 
 // ---------------------------------------------------------------- Overlays
 
+/** False during SSR and the first client render, so portals never cause hydration mismatches. */
+function useHydrated() {
+  const [h, setH] = useState(false);
+  useEffect(() => setH(true), []);
+  return h;
+}
+
 function useClosing(open: boolean, duration = 200) {
   const [mounted, setMounted] = useState(open);
   const [closing, setClosing] = useState(false);
@@ -379,7 +386,8 @@ export function Sheet({
   useFocusTrap(ref, open, onClose);
   // Swipe-down to dismiss on touch devices.
   const drag = useRef<{ y: number; dy: number } | null>(null);
-  if (!mounted || typeof document === "undefined") return null;
+  const hydrated = useHydrated();
+  if (!mounted || !hydrated) return null;
   return createPortal(
     <>
       <div className="overlay" data-closing={closing || undefined} onClick={onClose} />
@@ -434,7 +442,8 @@ export function Dialog({ open, onClose, title, children, actions }: { open: bool
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
   useFocusTrap(ref, open, onClose);
-  if (!open || typeof document === "undefined") return null;
+  const hydrated = useHydrated();
+  if (!open || !hydrated) return null;
   return createPortal(
     <>
       <div className="overlay dialog-overlay" onClick={onClose} />
