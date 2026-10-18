@@ -1,6 +1,7 @@
+import crypto from "node:crypto";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { one, run, all } from "./db";
+import { one, run, all, isDemo } from "./db";
 import { addDays, id, nowIso, sha256, token, verifyPassword, hashPassword } from "./util";
 import { toStudio, type StudioRow } from "./studio";
 import type { Ctx, Role } from "./permissions";
@@ -31,8 +32,52 @@ function cookieOptions(expires: Date) {
   };
 }
 
+// Demo deployments have one throwaway database per server instance, so their
+// sessions are signed cookies (HMAC) instead of rows in auth_sessions.
+const DEMO_PREFIX = "d1.";
+
+function demoSecret(): string {
+  return process.env.CRON_SECRET || process.env.SETUP_CODE || "studiomate-demo-secret";
+}
+
+function signDemo(payload: string): string {
+  return crypto.createHmac("sha256", demoSecret()).update(payload).digest("base64url");
+}
+
+function demoToken(userId: string, studioId: string, expires: Date): string {
+  const payload = Buffer.from(JSON.stringify({ u: userId, s: studioId, e: expires.getTime() })).toString("base64url");
+  return `${DEMO_PREFIX}${payload}.${signDemo(payload)}`;
+}
+
+async function loadDemoSession(rawToken: string): Promise<Ctx | null> {
+  const [payload, sig] = rawToken.slice(DEMO_PREFIX.length).split(".");
+  if (!payload || !sig) return null;
+  const expected = signDemo(payload);
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  let data: { u: string; s: string; e: number };
+  try {
+    data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!data.u || !data.s || data.e < Date.now()) return null;
+  const row = await one<{ user_name: string; email: string; role: Role; scope: "all" | "assigned" } & StudioRow>(
+    `SELECT u.name AS user_name, u.email, m.role, m.scope,
+            st.id, st.name, st.slug, st.timezone, st.locale, st.default_country, st.enabled_modules, st.settings, st.status
+       FROM users u
+       JOIN staff_memberships m ON m.user_id = u.id AND m.studio_id = ? AND m.active = 1
+       JOIN studios st ON st.id = m.studio_id
+      WHERE u.id = ?`,
+    data.s,
+    data.u,
+  );
+  if (!row || row.status !== "active") return null;
+  return { userId: data.u, name: row.user_name, email: row.email, role: row.role, scope: row.scope, studio: toStudio(row), sessionId: `demo:${payload.slice(0, 16)}` };
+}
+
 export async function loadSession(rawToken: string | undefined): Promise<Ctx | null> {
   if (!rawToken) return null;
+  if (rawToken.startsWith(DEMO_PREFIX)) return isDemo() ? loadDemoSession(rawToken) : null;
   // One round trip: session, user, membership and studio together.
   const row = await one<SessionRow & StudioRow & { session_studio_id: string }>(
     `SELECT s.id AS session_id, s.user_id, s.studio_id AS session_studio_id, s.expires_at, s.last_seen_at, u.name AS user_name, u.email, m.role, m.scope,
@@ -74,8 +119,12 @@ export async function requireCtx(): Promise<Ctx> {
 }
 
 export async function createSession(userId: string, studioId: string): Promise<void> {
-  const raw = token();
   const expires = new Date(addDays(new Date(), SESSION_DAYS));
+  if (isDemo()) {
+    (await cookies()).set(SESSION_COOKIE, demoToken(userId, studioId, expires), cookieOptions(expires));
+    return;
+  }
+  const raw = token();
   const h = await headers();
   await run(
     "INSERT INTO auth_sessions (id, token_hash, user_id, studio_id, expires_at, user_agent, created_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -95,7 +144,7 @@ export async function createSession(userId: string, studioId: string): Promise<v
 export async function destroySession(): Promise<void> {
   const jar = await cookies();
   const raw = jar.get(SESSION_COOKIE)?.value;
-  if (raw) await run("UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ?", nowIso(), sha256(raw));
+  if (raw && !raw.startsWith(DEMO_PREFIX)) await run("UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ?", nowIso(), sha256(raw));
   jar.delete(SESSION_COOKIE);
 }
 

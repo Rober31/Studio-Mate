@@ -47,7 +47,8 @@ function state(): State {
         const has = await client.execute("SELECT 1 FROM studios LIMIT 1");
         if (!has.rows.length) {
           const { seedDemo } = await import("./demo");
-          await initStore.run(true, () => seedDemo());
+          const { withDeterministicIds } = await import("./util");
+          await initStore.run(true, () => withDeterministicIds("studiomate-demo", () => seedDemo()));
         }
       }
     })();

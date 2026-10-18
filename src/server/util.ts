@@ -1,7 +1,26 @@
 import crypto from "node:crypto";
 
+let deterministic: { seed: string; n: number } | null = null;
+
 export function id(prefix: string): string {
+  if (deterministic) {
+    deterministic.n += 1;
+    return `${prefix}_${crypto.createHash("sha256").update(`${deterministic.seed}:${deterministic.n}`).digest("base64url").slice(0, 16)}`;
+  }
   return `${prefix}_${crypto.randomBytes(12).toString("base64url")}`;
+}
+
+/**
+ * Runs fn with reproducible ids, so every server instance of a demo deployment
+ * builds identical sample data (same links, same users).
+ */
+export async function withDeterministicIds<T>(seed: string, fn: () => Promise<T>): Promise<T> {
+  deterministic = { seed, n: 0 };
+  try {
+    return await fn();
+  } finally {
+    deterministic = null;
+  }
 }
 
 export function token(bytes = 32): string {
