@@ -20,7 +20,7 @@ type Result = {
 type Failure = { kind: "expired" | "not_eligible" | "window_closed" | "invalid_code" | "no_member" | "network" | "other"; message: string };
 
 /** S09 — auto-submits once; repeats reuse the same idempotency key so no double deduction. */
-export function CheckinClient({ slug, token, studioName, firstName }: { slug: string; token: string; studioName: string; firstName: string }) {
+export function CheckinClient({ slug, token, studioName, firstName, tz }: { slug: string; token: string; studioName: string; firstName: string; tz: string }) {
   const key = useRef(newKey());
   const started = useRef(false);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
@@ -62,7 +62,7 @@ export function CheckinClient({ slug, token, studioName, firstName }: { slug: st
     submit();
   }, [submit]);
 
-  const time = result ? new Intl.DateTimeFormat("he-IL", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(result.checked_in_at)) : "";
+  const time = result ? new Intl.DateTimeFormat("he-IL", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: tz }).format(new Date(result.checked_in_at)) : "";
 
   return (
     <div className="center-screen">

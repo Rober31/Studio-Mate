@@ -74,7 +74,7 @@ export function RegistrationForm({ slug, studioName, defaultCountry, noticeText 
   }
 
   return (
-    <form className="auth-card public-card" onSubmit={submit} noValidate>
+    <form className="auth-card public-card" onSubmit={submit} noValidate style={{ position: "relative" }}>
       <div className="public-head">
         <div className="public-studio">{studioName}</div>
         <h1 style={{ fontSize: 26, marginTop: 6 }}>נעים להכיר!</h1>

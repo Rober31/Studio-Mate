@@ -29,5 +29,5 @@ export default async function CheckinPage({ params, searchParams }: { params: Pr
       />
     );
   }
-  return <CheckinClient slug={slug} token={t} studioName={studio.name} firstName={member.firstName} />;
+  return <CheckinClient slug={slug} token={t} studioName={studio.name} firstName={member.firstName} tz={studio.timezone} />;
 }

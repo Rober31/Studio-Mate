@@ -147,8 +147,8 @@
 }
 .qr-frame .qr-svg svg {
   display: block;
-  width: min(56vmin, 520px);
-  height: min(56vmin, 520px);
+  width: min(46vh, 72vw, 520px);
+  height: min(46vh, 72vw, 520px);
 }
 .qr-frame .qr-svg {
   transition: opacity 260ms var(--ease), transform 260ms var(--ease);
@@ -158,8 +158,8 @@
   transform: scale(0.985);
 }
 .qr-placeholder {
-  width: min(56vmin, 520px);
-  height: min(56vmin, 520px);
+  width: min(46vh, 72vw, 520px);
+  height: min(46vh, 72vw, 520px);
   display: grid;
   place-items: center;
   color: #5d636b;
@@ -210,10 +210,14 @@
 }
 .hp-field {
   position: absolute;
-  left: -10000px;
   width: 1px;
   height: 1px;
+  margin: -1px;
+  padding: 0;
   overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* Registration poster (print-friendly) */
