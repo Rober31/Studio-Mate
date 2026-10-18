@@ -118,7 +118,7 @@ export function RegistrationsView({
                   {r.contact_allowed ? "אישר/ה וואטסאפ" : "ללא אישור וואטסאפ — שיחה בלבד"}
                 </span>
               </div>
-              {r.note && <p className="small muted" style={{ marginTop: 8 }}>&ldquo;{r.note}&rdquo;</p>}
+              {r.note && <p className="small muted" style={{ marginTop: 8 }}>הערה: {r.note}</p>}
               {r.matched_existing === 1 && (
                 <div className="row xsmall" style={{ color: "var(--orange)", gap: 5, marginTop: 8 }}>
                   <Icon name="info" size={14} /> מספר קיים{r.contact_name ? ` (${r.contact_name})` : ""} — נוצרה משימת בדיקה, הפרטים בתיק לא שונו

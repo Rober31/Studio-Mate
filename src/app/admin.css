@@ -197,7 +197,6 @@
   height: 140px;
   padding-top: 8px;
   border-bottom: 1px solid var(--line);
-  direction: ltr;
 }
 .cols-chart .col-bar {
   flex: 1 1 0;
@@ -240,7 +239,6 @@
   opacity: 0;
   transition: opacity var(--d-fast) var(--ease);
   z-index: 2;
-  direction: rtl;
 }
 .cols-chart .col-bar:hover .col-tip,
 .cols-chart .col-bar:focus .col-tip {
@@ -351,4 +349,15 @@
   text-align: left;
   max-height: 260px;
   overflow: auto;
+}
+@media (max-width: 720px) {
+  .set-row.wrap-mobile {
+    flex-wrap: wrap;
+  }
+  .set-row.wrap-mobile > .grow {
+    flex-basis: 100%;
+  }
+  .set-row.wrap-mobile > .col {
+    align-items: flex-start !important;
+  }
 }

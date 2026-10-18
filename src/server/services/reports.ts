@@ -112,6 +112,9 @@ export function auditLog(ctx: Ctx, f: { action?: string; page?: number }) {
   if (f.action) {
     where.push("a.action LIKE ?");
     params.push(`${f.action}%`);
+  } else {
+    // Sign-ins are routine; they stay available under their own filter.
+    where.push("a.action NOT LIKE 'auth.%'");
   }
   const items = all<{ id: string; action: string; entity: string; entity_id: string | null; reason: string | null; diff: string | null; created_at: string; actor: string | null }>(
     `SELECT a.id, a.action, a.entity, a.entity_id, a.reason, a.diff, a.created_at, u.name AS actor FROM audit_events a LEFT JOIN users u ON u.id = a.actor_id

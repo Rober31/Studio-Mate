@@ -540,11 +540,18 @@ function RulesSection({ settings }: { settings: Settings }) {
           const v = h.field ? (r[h.field] ?? 0) : 0;
           return (
             <div key={k} className={cx("set-row", !r.enabled && "disabled")} style={{ alignItems: "flex-start" }}>
-              <div className="grow">
-                <div className="bold set-label">{RULE_LABEL[k]}</div>
-                <div className="small muted">{h.text(v)}</div>
+              <div className="grow stack-2">
+                <div>
+                  <div className="bold set-label">{RULE_LABEL[k]}</div>
+                  <div className="small muted">{h.text(v)}</div>
+                </div>
+                {h.field && r.enabled && (
+                  <div className="row fade-in" style={{ gap: 8 }}>
+                    <span className="small muted">{h.field === "threshold" ? "סף:" : "מספר ימים:"}</span>
+                    <NumField value={v} min={h.min} max={h.max} unit={h.unit} label={`${RULE_LABEL[k]} — ${h.unit}`} error={ruleErrors[k]} onChange={(n) => setRule(k, { [h.field!]: n })} />
+                  </div>
+                )}
               </div>
-              {h.field && r.enabled && <NumField value={v} min={h.min} max={h.max} unit={h.unit} label={`${RULE_LABEL[k]} — ${h.unit}`} error={ruleErrors[k]} onChange={(n) => setRule(k, { [h.field!]: n })} />}
               <Switch checked={r.enabled} label={RULE_LABEL[k]} onChange={(on) => setRule(k, { enabled: on })} />
             </div>
           );
@@ -559,21 +566,21 @@ function RulesSection({ settings }: { settings: Settings }) {
           </Button>
         }
       >
-        <div className="set-row">
+        <div className="set-row wrap-mobile">
           <div className="grow">
             <div className="bold">זמן המתנה בין פניות</div>
             <div className="small muted">אחרי הודעה שנשלחה, הלקוח לא יופיע שוב ברשימה עד שיעבור הזמן הזה.</div>
           </div>
           <NumField value={cooldown} min={0} max={720} unit="שעות" label="זמן המתנה בשעות" error={errors.cooldownHours} onChange={setCooldown} />
         </div>
-        <div className="set-row">
+        <div className="set-row wrap-mobile">
           <div className="grow">
             <div className="bold">מקסימום פניות בשבוע</div>
             <div className="small muted">מספר הפניות השיווקיות ללקוח אחד בתוך 7 ימים.</div>
           </div>
           <NumField value={maxContacts} min={1} max={20} unit="פניות" label="מקסימום פניות ב-7 ימים" error={errors.maxContactsPer7Days} onChange={setMaxContacts} />
         </div>
-        <div className="set-row">
+        <div className="set-row wrap-mobile">
           <div className="grow">
             <div className="bold">תוקף נתונים מיובאים</div>
             <div className="small muted">אחרי הזמן הזה בלי ייבוא חדש, כללים שתלויים במנויים מיובאים מושהים ומוצגת אזהרה.</div>
@@ -685,21 +692,21 @@ function QrSection({ settings, slug }: { settings: Settings; slug: string }) {
           </Button>
         }
       >
-        <div className="set-row">
+        <div className="set-row wrap-mobile">
           <div className="grow">
             <div className="bold">החלפת הקוד על המסך</div>
             <div className="small muted">הקוד מתחלף כל כמה שניות, כדי שצילום ישן לא יעבוד מהבית.</div>
           </div>
           <NumField value={rotate} min={15} max={600} unit="שניות" label="החלפת קוד בשניות" error={errors.qrRotateSeconds} onChange={setRotate} />
         </div>
-        <div className="set-row">
+        <div className="set-row wrap-mobile">
           <div className="grow">
             <div className="bold">פתיחת הרישום לפני השיעור</div>
             <div className="small muted">כמה דקות לפני תחילת השיעור אפשר לסרוק.</div>
           </div>
           <NumField value={before} min={0} max={180} unit="דקות" label="דקות לפני השיעור" error={errors.checkinWindowBeforeMin} onChange={setBefore} />
         </div>
-        <div className="set-row">
+        <div className="set-row wrap-mobile">
           <div className="grow">
             <div className="bold">סגירת הרישום אחרי ההתחלה</div>
             <div className="small muted">אחרי זה רק עובד/ת יכול/ה לרשום נוכחות ידנית.</div>

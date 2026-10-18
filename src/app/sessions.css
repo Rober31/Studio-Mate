@@ -56,8 +56,13 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--s-4);
-  flex-wrap: wrap;
+  gap: var(--s-3);
+}
+.session-hero > :first-child {
+  flex: 1 1 auto;
+}
+.session-hero > .menu-wrap {
+  flex: none;
 }
 .session-meta {
   display: flex;
