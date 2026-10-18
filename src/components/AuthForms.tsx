@@ -5,6 +5,7 @@ import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
 import { Button, Checkbox, TextField, Banner, SuccessCheck } from "./ui";
 import { BrandMark } from "./BrandMark";
+import { ThemeMenuButton } from "./ThemeSwitch";
 
 function useForm<T extends Record<string, string>>(initial: T) {
   const [values, setValues] = useState(initial);
@@ -39,6 +40,9 @@ function useForm<T extends Record<string, string>>(initial: T) {
 export function AuthHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
     <div className="col" style={{ alignItems: "center", textAlign: "center", gap: 10, marginBottom: 28 }}>
+      <div className="auth-theme">
+        <ThemeMenuButton />
+      </div>
       <BrandMark size={52} />
       <h1 style={{ fontSize: 26, marginTop: 6 }}>{title}</h1>
       {subtitle && <p className="muted">{subtitle}</p>}

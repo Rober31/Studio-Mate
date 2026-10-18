@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { Icon } from "./Icon";
 import { Avatar, Menu, Sheet, cx } from "./ui";
 import { BrandMark } from "./BrandMark";
+import { ThemeMenuButton, ThemeSegmented } from "./ThemeSwitch";
 import { api } from "@/lib/api";
 
 type NavItem = { href: string; label: string; icon: string; count?: number; primary?: boolean; section?: string };
@@ -85,6 +86,10 @@ export function AppShell({
           ))}
         </nav>
         <div className="sidebar-foot">
+          <div className="sidebar-theme">
+            <div className="theme-switch-label">מראה</div>
+            <ThemeSegmented block />
+          </div>
           <Menu
             up
             trigger={(p) => (
@@ -124,9 +129,12 @@ export function AppShell({
           <BrandMark size={28} />
           <span className="bold">{current?.label ?? "StudioMate"}</span>
         </div>
-        <span className="xsmall subtle truncate" style={{ maxWidth: "45%" }}>
-          {studio.name}
-        </span>
+        <div className="row" style={{ gap: 4, minWidth: 0 }}>
+          <span className="xsmall subtle truncate" style={{ maxWidth: 150 }}>
+            {studio.name}
+          </span>
+          <ThemeMenuButton />
+        </div>
       </header>
 
       <main id="main" className="main">

@@ -1,6 +1,7 @@
 "use client";
 import "@/app/admin.css";
 
+import { ThemeSegmented } from "../ThemeSwitch";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
@@ -768,6 +769,11 @@ function AccountSection({ me }: { me: { name: string; email: string; role: strin
             </div>
           </div>
           <Badge>{me.role}</Badge>
+        </div>
+      </Section>
+      <Section title="מראה" sub="בהיר, כהה, או לפי הגדרות המכשיר. נשמר בדפדפן הזה.">
+        <div className="card-pad">
+          <ThemeSegmented block showLabels />
         </div>
       </Section>
       <section className="card fade-in">
