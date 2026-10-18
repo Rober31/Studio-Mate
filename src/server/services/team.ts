@@ -263,7 +263,7 @@ export function updateStudioSettings(
   } catch {
     fields.timezone = "אזור זמן לא מוכר.";
   }
-  const modules = input.modules ? (input.modules.filter((m) => ["crm", "ai", "qr"].includes(m)) as ModuleKey[]) : studio.modules;
+  const modules = input.modules ? (input.modules.filter((m) => ["crm", "ai", "qr"].includes(m)) as ModuleKey[]) : [...studio.modules];
   if (!modules.includes("crm")) modules.unshift("crm");
   const settings = mergeSettings({ ...studio.settings, ...(input.settings ?? {}), rules: { ...studio.settings.rules, ...(input.settings?.rules ?? {}) } });
   const num = (v: number, min: number, max: number, key: string, msg: string) => {

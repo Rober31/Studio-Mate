@@ -218,9 +218,9 @@ export function previewImport(
     }
     // Match: source id first, then normalized phone (name alone is never a key).
     let match: { id: string } | undefined;
-    if (data.external_id) match = one("SELECT id FROM contacts WHERE studio_id = ? AND source = 'import' AND external_id = ? AND merged_into IS NULL", ctx.studio.id, data.external_id);
-    if (!match && phone.e164) match = one("SELECT id FROM contacts WHERE studio_id = ? AND phone_e164 = ? AND merged_into IS NULL", ctx.studio.id, phone.e164);
-    if (phone.e164) {
+    if (data.external_id) match = one("SELECT id FROM contacts WHERE studio_id = ? AND source = 'import' AND external_id = ? AND merged_into IS NULL AND archived = 0", ctx.studio.id, data.external_id);
+    if (!match && phone.valid && phone.e164) match = one("SELECT id FROM contacts WHERE studio_id = ? AND phone_e164 = ? AND merged_into IS NULL AND archived = 0", ctx.studio.id, phone.e164);
+    if (phone.valid && phone.e164) {
       const prev = seenPhones.get(phone.e164);
       if (prev && !match) {
         problems.push(`אותו טלפון כמו שורה ${prev}`);
@@ -318,7 +318,7 @@ export function commitImport(ctx: Ctx, batchId: string, previewHash: string) {
       const d = r.data;
       let contactId = r.matchId ?? null;
       let status = "created";
-      if (contactId && one("SELECT 1 FROM contacts WHERE id = ? AND studio_id = ? AND merged_into IS NULL", contactId, ctx.studio.id)) {
+      if (contactId && one("SELECT 1 FROM contacts WHERE id = ? AND studio_id = ? AND merged_into IS NULL AND archived = 0", contactId, ctx.studio.id)) {
         // Update only empty fields; never overwrite data staff already verified.
         run(
           `UPDATE contacts SET interest = COALESCE(interest, ?), owner_id = COALESCE(owner_id, ?), external_id = COALESCE(external_id, ?),
@@ -334,7 +334,7 @@ export function commitImport(ctx: Ctx, batchId: string, previewHash: string) {
       } else {
         contactId = id("con");
         const phone = normalizePhone(d.phone, ctx.studio.default_country);
-        const dupPhone = phone.e164 ? one("SELECT 1 FROM contacts WHERE studio_id = ? AND phone_e164 = ? AND merged_into IS NULL", ctx.studio.id, phone.e164) : null;
+        const dupPhone = phone.valid && phone.e164 ? one("SELECT 1 FROM contacts WHERE studio_id = ? AND phone_e164 = ? AND merged_into IS NULL AND archived = 0", ctx.studio.id, phone.e164) : null;
         const review = r.status === "needs_review" || !!dupPhone;
         run(
           `INSERT INTO contacts (id, studio_id, display_name, phone_e164, phone_raw, phone_valid, preferred_language, pipeline_stage, owner_id, source, external_id,
