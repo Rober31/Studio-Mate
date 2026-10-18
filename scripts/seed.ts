@@ -150,7 +150,7 @@ run("UPDATE contacts SET pipeline_stage = 'lost', stage_reason = 'עברה לג�
 setContactPreference(ctx, contacts[21], false, "ביקשה שלא ישלחו לה הודעות");
 
 // A confirmed contact for a few leads so not every lead appears.
-for (const i of [14, 15]) {
+for (const i of [14, 15, 16, 17, 24, 25, 26, 27, 28]) {
   run(
     "INSERT INTO interaction_events (id, studio_id, contact_id, channel, event_type, evidence_type, outcome, note, marketing, occurred_at, actor_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
     id("evt"),
