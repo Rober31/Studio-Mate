@@ -1,6 +1,6 @@
 // Class sessions, attendance, balance deductions and QR check-in (spec §19–§20, QR-02/03/04).
 
-import { all, one, run, tx } from "../db";
+import { all, batch, one, placeholders, run, tx } from "../db";
 import { AppError, conflict, invalid, notFound } from "../errors";
 import { assertCan, can, type Ctx } from "../permissions";
 import type { Studio } from "../studio";
@@ -34,22 +34,24 @@ function sessionScope(ctx: Ctx): { sql: string; params: unknown[] } {
   return { sql: "1=1", params: [] };
 }
 
-export function listSessions(ctx: Ctx, fromIso: string, toIso: string): SessionRow[] {
+export async function listSessions(ctx: Ctx, fromIso: string, toIso: string): Promise<SessionRow[]> {
   assertCan(ctx, "attendance.record");
   const scope = sessionScope(ctx);
-  return all<SessionRow>(
-    `${SELECT} WHERE s.studio_id = ? AND s.start_at >= ? AND s.start_at < ? AND ${scope.sql} ORDER BY s.start_at`,
-    ctx.studio.id,
-    fromIso,
-    toIso,
-    ...scope.params,
+  return (
+    await all<SessionRow>(
+      `${SELECT} WHERE s.studio_id = ? AND s.start_at >= ? AND s.start_at < ? AND ${scope.sql} ORDER BY s.start_at`,
+      ctx.studio.id,
+      fromIso,
+      toIso,
+      ...scope.params,
+    )
   ).map((s) => withEffectiveStatus(s));
 }
 
-export function getSession(ctx: Ctx, sessionId: string): SessionRow {
+export async function getSession(ctx: Ctx, sessionId: string): Promise<SessionRow> {
   assertCan(ctx, "attendance.record");
   const scope = sessionScope(ctx);
-  const s = one<SessionRow>(`${SELECT} WHERE s.id = ? AND s.studio_id = ? AND ${scope.sql}`, sessionId, ctx.studio.id, ...scope.params);
+  const s = await one<SessionRow>(`${SELECT} WHERE s.id = ? AND s.studio_id = ? AND ${scope.sql}`, sessionId, ctx.studio.id, ...scope.params);
   if (!s) throw notFound("השיעור");
   return withEffectiveStatus(s);
 }
@@ -67,7 +69,7 @@ export function checkinWindow(studio: Studio, s: { start_at: string }) {
   };
 }
 
-export function saveSession(
+export async function saveSession(
   ctx: Ctx,
   input: { id?: string; title?: string; date?: string; start?: string; end?: string; trainer_id?: string | null; version?: number; change_reason?: string; repeat_weeks?: number },
 ) {
@@ -80,7 +82,7 @@ export function saveSession(
   if (!input.end || !/^\d{2}:\d{2}$/.test(input.end)) fields.end = "בחרו שעת סיום.";
   if (input.start && input.end && input.end <= input.start) fields.end = "הסיום צריך להיות אחרי ההתחלה.";
   if (Object.keys(fields).length) throw invalid(fields);
-  if (input.trainer_id && !one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1", ctx.studio.id, input.trainer_id)) {
+  if (input.trainer_id && !(await one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1", ctx.studio.id, input.trainer_id))) {
     throw invalid({ trainer_id: "המדריך/ה לא בצוות." });
   }
   const tz = ctx.studio.timezone;
@@ -88,14 +90,14 @@ export function saveSession(
   const endAt = localDateTimeToUtc(input.date!, input.end!, tz);
   const now = nowIso();
   if (input.id) {
-    const current = getSession(ctx, input.id);
+    const current = await getSession(ctx, input.id);
     if (input.version !== current.version) throw conflict();
     const timesChanged = current.start_at !== startAt || current.end_at !== endAt;
     if (timesChanged && current.start_at < now && !input.change_reason?.trim()) {
       throw invalid({ change_reason: "השיעור כבר התקיים. כתבו למה משנים את השעות." });
     }
-    tx(() => {
-      const res = run(
+    await tx(async () => {
+      const res = await run(
         "UPDATE class_sessions SET title = ?, start_at = ?, end_at = ?, trainer_id = ?, version = version + 1, updated_at = ? WHERE id = ? AND studio_id = ? AND version = ?",
         title,
         startAt,
@@ -108,60 +110,55 @@ export function saveSession(
       );
       if (res.changes !== 1) throw conflict();
       if (timesChanged) {
-        audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "session.rescheduled", entity: "class_session", entityId: input.id, reason: input.change_reason ?? null, diff: { start: [current.start_at, startAt], end: [current.end_at, endAt] } });
+        await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "session.rescheduled", entity: "class_session", entityId: input.id, reason: input.change_reason ?? null, diff: { start: [current.start_at, startAt], end: [current.end_at, endAt] } });
       }
     });
     return getSession(ctx, input.id!);
   }
   const weeks = Math.min(Math.max(Math.floor(input.repeat_weeks ?? 1), 1), 26);
-  let firstId = "";
-  tx(() => {
-    for (let w = 0; w < weeks; w++) {
-      const sid = id("cls");
-      if (!firstId) firstId = sid;
-      run(
-        "INSERT INTO class_sessions (id, studio_id, title, trainer_id, start_at, end_at, status, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?, 'scheduled', ?,?,?)",
-        sid,
-        ctx.studio.id,
-        title,
-        input.trainer_id || null,
-        new Date(Date.parse(startAt) + w * 7 * 86_400_000).toISOString(),
-        new Date(Date.parse(endAt) + w * 7 * 86_400_000).toISOString(),
-        ctx.userId,
-        now,
-        now,
-      );
-    }
-  });
+  const ids = Array.from({ length: weeks }, () => id("cls"));
+  const firstId = ids[0];
+  await batch(
+    ids.map((sid, w): [string, ...unknown[]] => [
+      "INSERT INTO class_sessions (id, studio_id, title, trainer_id, start_at, end_at, status, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?, 'scheduled', ?,?,?)",
+      sid,
+      ctx.studio.id,
+      title,
+      input.trainer_id || null,
+      new Date(Date.parse(startAt) + w * 7 * 86_400_000).toISOString(),
+      new Date(Date.parse(endAt) + w * 7 * 86_400_000).toISOString(),
+      ctx.userId,
+      now,
+      now,
+    ]),
+  );
   return getSession(ctx, firstId);
 }
 
-export function setSessionOpen(ctx: Ctx, sessionId: string, open: boolean) {
+export async function setSessionOpen(ctx: Ctx, sessionId: string, open: boolean) {
   assertCan(ctx, "attendance.record");
-  const s = getSession(ctx, sessionId);
+  const s = await getSession(ctx, sessionId);
   if (s.status === "cancelled") throw new AppError("blocked", "השיעור בוטל.");
-  run("UPDATE class_sessions SET status = ?, version = version + 1, updated_at = ? WHERE id = ?", open ? "open" : "completed", nowIso(), sessionId);
-  if (!open) run("UPDATE qr_challenges SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL", nowIso(), sessionId);
+  await run("UPDATE class_sessions SET status = ?, version = version + 1, updated_at = ? WHERE id = ?", open ? "open" : "completed", nowIso(), sessionId);
+  if (!open) await run("UPDATE qr_challenges SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL", nowIso(), sessionId);
   return getSession(ctx, sessionId);
 }
 
-export function cancelSession(ctx: Ctx, sessionId: string, reason: string, version: number) {
+export async function cancelSession(ctx: Ctx, sessionId: string, reason: string, version: number) {
   assertCan(ctx, "sessions.manage");
-  const s = getSession(ctx, sessionId);
+  const s = await getSession(ctx, sessionId);
   if (!reason?.trim()) throw invalid({ reason: "כתבו סיבה לביטול." });
   if (s.version !== version) throw conflict();
   if (s.status === "cancelled") return s;
   const now = nowIso();
-  tx(() => {
-    run("UPDATE class_sessions SET status = 'cancelled', cancel_reason = ?, version = version + 1, updated_at = ? WHERE id = ?", reason.trim(), now, sessionId);
-    run("UPDATE qr_challenges SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL", now, sessionId);
+  await tx(async () => {
+    await run("UPDATE class_sessions SET status = 'cancelled', cancel_reason = ?, version = version + 1, updated_at = ? WHERE id = ?", reason.trim(), now, sessionId);
+    await run("UPDATE qr_challenges SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL", now, sessionId);
     // Policy: attendance of a cancelled class is reversed and local deductions returned once.
-    for (const a of all<{ id: string }>("SELECT id FROM attendance WHERE session_id = ? AND status <> 'reversed'", sessionId)) {
-      reverseRaw(ctx.studio.id, a.id, `השיעור בוטל: ${reason.trim()}`, ctx.userId);
-    }
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "session.cancelled", entity: "class_session", entityId: sessionId, reason });
+    await reverseMany(ctx.studio.id, sessionId, `השיעור בוטל: ${reason.trim()}`, ctx.userId);
+    await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "session.cancelled", entity: "class_session", entityId: sessionId, reason });
   });
-  markEvaluationStale(ctx.studio.id);
+  await markEvaluationStale(ctx.studio.id);
   return getSession(ctx, sessionId);
 }
 
@@ -180,8 +177,8 @@ export type RosterRow = {
   deducted: number;
 };
 
-export function roster(ctx: Ctx, sessionId: string): RosterRow[] {
-  getSession(ctx, sessionId);
+export async function roster(ctx: Ctx, sessionId: string): Promise<RosterRow[]> {
+  await getSession(ctx, sessionId);
   return all<RosterRow>(
     `SELECT a.id, a.contact_id, c.display_name AS contact_name, a.membership_id, p.name AS plan_name, a.status, a.channel, a.checked_in_at,
             u.name AS actor_name, a.reversal_reason, a.version,
@@ -211,26 +208,26 @@ export type CheckInResult = {
  * Atomic check-in (QR-02 step 4): one attendance per person+session, at most one
  * deduction, and only for local balance plans. Repeats return the same result.
  */
-export function commitCheckIn(
+export async function commitCheckIn(
   studio: Studio,
   p: { contactId: string; sessionId: string; membershipId?: string | null; noMembership?: boolean; channel: "qr" | "manual"; actorId: string | null; note?: string | null },
-): CheckInResult {
-  return tx(() => {
-    const session = one<{ id: string; title: string; status: string; start_at: string }>(
+): Promise<CheckInResult> {
+  return tx(async () => {
+    const session = await one<{ id: string; title: string; status: string; start_at: string }>(
       "SELECT id, title, status, start_at FROM class_sessions WHERE id = ? AND studio_id = ?",
       p.sessionId,
       studio.id,
     );
     if (!session) throw notFound("השיעור");
     if (session.status === "cancelled") throw new AppError("blocked", "השיעור בוטל.");
-    const contact = one<{ id: string; pipeline_stage: string; display_name: string }>(
+    const contact = await one<{ id: string; pipeline_stage: string; display_name: string }>(
       "SELECT id, pipeline_stage, display_name FROM contacts WHERE id = ? AND studio_id = ? AND merged_into IS NULL",
       p.contactId,
       studio.id,
     );
     if (!contact) throw notFound("הלקוח");
 
-    const existing = one<{ id: string; status: string; checked_in_at: string; membership_id: string | null }>(
+    const existing = await one<{ id: string; status: string; checked_in_at: string; membership_id: string | null }>(
       "SELECT id, status, checked_in_at, membership_id FROM attendance WHERE studio_id = ? AND contact_id = ? AND session_id = ?",
       studio.id,
       contact.id,
@@ -238,7 +235,7 @@ export function commitCheckIn(
     );
     if (existing) {
       if (existing.status === "reversed") throw new AppError("blocked", "הנוכחות בשיעור הזה בוטלה בעבר. פנו לבעלי הסטודיו לרישום מחדש.");
-      const m = existing.membership_id ? getMembership(studio.id, existing.membership_id) : null;
+      const m = existing.membership_id ? await getMembership(studio.id, existing.membership_id) : null;
       return {
         status: "already_recorded",
         attendance_id: existing.id,
@@ -253,7 +250,7 @@ export function commitCheckIn(
     }
 
     let membership: MembershipView | null = null;
-    const eligible = eligibleMemberships(studio.id, contact.id);
+    const eligible = await eligibleMemberships(studio.id, contact.id);
     if (p.membershipId) {
       membership = eligible.find((m) => m.id === p.membershipId) ?? null;
       if (!membership) throw new AppError("blocked", "המנוי שנבחר אינו זכאי כרגע (פג תוקף, מוקפא או שנגמרה היתרה).");
@@ -268,7 +265,7 @@ export function commitCheckIn(
     const external = membership?.authority === "external";
     const deducts = !!membership && !external && membership.plan_type !== "period" && membership.plan_deducts === 1;
     if (deducts && (membership!.balance ?? 0) <= 0) throw new AppError("blocked", "נגמרה היתרה במנוי. גשו לקבלה.");
-    run(
+    await run(
       `INSERT INTO attendance (id, studio_id, contact_id, session_id, membership_id, status, channel, checked_in_at, actor_id, note)
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
       attendanceId,
@@ -283,7 +280,7 @@ export function commitCheckIn(
       p.note?.trim() || null,
     );
     if (deducts) {
-      run(
+      await run(
         "INSERT INTO balance_entries (id, studio_id, membership_id, kind, delta, attendance_id, reason, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
         id("bal"),
         studio.id,
@@ -296,7 +293,7 @@ export function commitCheckIn(
         now,
       );
     }
-    run(
+    await run(
       "INSERT INTO interaction_events (id, studio_id, contact_id, channel, event_type, evidence_type, note, occurred_at, actor_id) VALUES (?,?,?,?,?,?,?,?,?)",
       id("evt"),
       studio.id,
@@ -310,8 +307,8 @@ export function commitCheckIn(
     );
     const trialLike = !membership || membership.plan_type === "trial";
     if (trialLike && ["new_lead", "contacted", "trial_scheduled", "decision_pending"].includes(contact.pipeline_stage)) {
-      run("UPDATE contacts SET pipeline_stage = 'trial_attended', version = version + 1, updated_at = ? WHERE id = ?", now, contact.id);
-      run(
+      await run("UPDATE contacts SET pipeline_stage = 'trial_attended', version = version + 1, updated_at = ? WHERE id = ?", now, contact.id);
+      await run(
         "INSERT INTO stage_changes (id, studio_id, contact_id, from_stage, to_stage, reason, actor_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
         id("stg"),
         studio.id,
@@ -323,7 +320,7 @@ export function commitCheckIn(
         now,
       );
     }
-    markEvaluationStale(studio.id);
+    await markEvaluationStale(studio.id);
     return {
       status: "checked_in",
       attendance_id: attendanceId,
@@ -338,17 +335,17 @@ export function commitCheckIn(
   });
 }
 
-export function manualCheckIn(
+export async function manualCheckIn(
   ctx: Ctx,
   input: { session_id: string; contact_id?: string; membership_id?: string | null; no_membership?: boolean; late_reason?: string },
 ) {
   assertCan(ctx, "attendance.record");
-  const s = getSession(ctx, input.session_id);
+  const s = await getSession(ctx, input.session_id);
   if (!input.contact_id) throw invalid({ contact_id: "בחרו לקוח." });
   if (s.status === "completed" && !input.late_reason?.trim()) {
     throw invalid({ late_reason: "השיעור כבר הסתיים. כתבו סיבה לרישום מאוחר." });
   }
-  const result = commitCheckIn(ctx.studio, {
+  const result = await commitCheckIn(ctx.studio, {
     contactId: input.contact_id,
     sessionId: s.id,
     membershipId: input.membership_id ?? null,
@@ -358,24 +355,24 @@ export function manualCheckIn(
     note: input.late_reason ?? null,
   });
   if (input.late_reason?.trim() && !result.already_recorded) {
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "attendance.late_recorded", entity: "attendance", entityId: result.attendance_id, reason: input.late_reason.trim() });
+    await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "attendance.late_recorded", entity: "attendance", entityId: result.attendance_id, reason: input.late_reason.trim() });
   }
   return result;
 }
 
-function reverseRaw(studioId: string, attendanceId: string, reason: string, actorId: string | null) {
-  const a = one<{ id: string; status: string }>("SELECT id, status FROM attendance WHERE id = ? AND studio_id = ?", attendanceId, studioId);
+async function reverseRaw(studioId: string, attendanceId: string, reason: string, actorId: string | null) {
+  const a = await one<{ id: string; status: string }>("SELECT id, status FROM attendance WHERE id = ? AND studio_id = ?", attendanceId, studioId);
   if (!a) throw notFound("הנוכחות");
   if (a.status === "reversed") return { alreadyReversed: true };
   const now = nowIso();
-  run("UPDATE attendance SET status = 'reversed', reversed_at = ?, reversed_by = ?, reversal_reason = ?, version = version + 1 WHERE id = ?", now, actorId, reason, attendanceId);
-  const deduction = one<{ id: string; membership_id: string }>(
+  await run("UPDATE attendance SET status = 'reversed', reversed_at = ?, reversed_by = ?, reversal_reason = ?, version = version + 1 WHERE id = ?", now, actorId, reason, attendanceId);
+  const deduction = await one<{ id: string; membership_id: string }>(
     "SELECT id, membership_id FROM balance_entries WHERE attendance_id = ? AND kind = 'deduction'",
     attendanceId,
   );
   if (deduction) {
     // The unique index on reverses_id guarantees a single refund (AC-Q06).
-    run(
+    await run(
       "INSERT OR IGNORE INTO balance_entries (id, studio_id, membership_id, kind, delta, attendance_id, reverses_id, reason, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
       id("bal"),
       studioId,
@@ -389,60 +386,90 @@ function reverseRaw(studioId: string, attendanceId: string, reason: string, acto
       now,
     );
   }
-  audit({ studioId, actorId, action: "attendance.reversed", entity: "attendance", entityId: attendanceId, reason });
+  await audit({ studioId, actorId, action: "attendance.reversed", entity: "attendance", entityId: attendanceId, reason });
   return { alreadyReversed: false };
 }
 
-export function reverseAttendance(ctx: Ctx, attendanceId: string, reason: string, version?: number) {
+/** Reverses every active attendance of a session with a fixed number of queries (class cancellation). */
+async function reverseMany(studioId: string, sessionId: string, reason: string, actorId: string | null) {
+  const rows = await all<{ id: string; deduction_id: string | null; membership_id: string | null }>(
+    `SELECT a.id, d.id AS deduction_id, d.membership_id FROM attendance a
+       LEFT JOIN balance_entries d ON d.attendance_id = a.id AND d.kind = 'deduction'
+      WHERE a.session_id = ? AND a.studio_id = ? AND a.status <> 'reversed'`,
+    sessionId,
+    studioId,
+  );
+  if (!rows.length) return;
+  const now = nowIso();
+  const stmts: [string, ...unknown[]][] = [];
+  for (const r of rows) {
+    stmts.push(["UPDATE attendance SET status = 'reversed', reversed_at = ?, reversed_by = ?, reversal_reason = ?, version = version + 1 WHERE id = ?", now, actorId, reason, r.id]);
+    if (r.deduction_id) {
+      stmts.push([
+        "INSERT OR IGNORE INTO balance_entries (id, studio_id, membership_id, kind, delta, attendance_id, reverses_id, reason, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        id("bal"), studioId, r.membership_id, "reversal", 1, null, r.deduction_id, reason, actorId, now,
+      ]);
+    }
+    stmts.push([
+      "INSERT INTO audit_events (id, studio_id, actor_id, action, entity, entity_id, reason, created_at) VALUES (?,?,?,?,?,?,?,?)",
+      id("aud"), studioId, actorId, "attendance.reversed", "attendance", r.id, reason, now,
+    ]);
+  }
+  await batch(stmts);
+}
+
+export async function reverseAttendance(ctx: Ctx, attendanceId: string, reason: string, version?: number) {
   assertCan(ctx, "attendance.correct");
   if (!reason?.trim()) throw invalid({ reason: "כתבו סיבה לביטול הנוכחות." });
-  const a = one<{ id: string; session_id: string; version: number; status: string }>(
+  const a = await one<{ id: string; session_id: string; version: number; status: string }>(
     "SELECT id, session_id, version, status FROM attendance WHERE id = ? AND studio_id = ?",
     attendanceId,
     ctx.studio.id,
   );
   if (!a) throw notFound("הנוכחות");
-  getSession(ctx, a.session_id);
+  await getSession(ctx, a.session_id);
   if (a.status === "reversed") return { status: "already_reversed" as const };
   if (version !== undefined && version !== a.version) throw conflict();
-  tx(() => reverseRaw(ctx.studio.id, attendanceId, reason.trim(), ctx.userId));
-  markEvaluationStale(ctx.studio.id);
+  await tx(() => reverseRaw(ctx.studio.id, attendanceId, reason.trim(), ctx.userId));
+  await markEvaluationStale(ctx.studio.id);
   return { status: "reversed" as const };
 }
 
 // ---------------------------------------------------------------------------
 // QR challenges: short-lived random token bound to studio + session; no PII.
 
-export function issueChallenge(ctx: Ctx, sessionId: string) {
+export async function issueChallenge(ctx: Ctx, sessionId: string) {
   assertCan(ctx, "attendance.record");
-  const s = getSession(ctx, sessionId);
+  const s = await getSession(ctx, sessionId);
   if (s.status === "cancelled") throw new AppError("blocked", "השיעור בוטל.");
   if (s.status === "completed") throw new AppError("blocked", "השיעור הסתיים. אפשר לרשום נוכחות ידנית.");
   const now = nowIso();
-  if (s.status === "scheduled") run("UPDATE class_sessions SET status = 'open', version = version + 1, updated_at = ? WHERE id = ?", now, s.id);
+  if (s.status === "scheduled") await run("UPDATE class_sessions SET status = 'open', version = version + 1, updated_at = ? WHERE id = ?", now, s.id);
   const raw = token(18);
   const rotate = ctx.studio.settings.qrRotateSeconds;
   // Small grace so a code scanned right before rotation still works.
   const expires = new Date(Date.now() + (rotate + 15) * 1000).toISOString();
-  run("INSERT INTO qr_challenges (id, studio_id, session_id, token_hash, expires_at, created_at) VALUES (?,?,?,?,?,?)", id("qrc"), ctx.studio.id, s.id, sha256(raw), expires, now);
-  run("DELETE FROM qr_challenges WHERE expires_at < ?", addMinutes(now, -60));
+  await batch([
+    ["INSERT INTO qr_challenges (id, studio_id, session_id, token_hash, expires_at, created_at) VALUES (?,?,?,?,?,?)", id("qrc"), ctx.studio.id, s.id, sha256(raw), expires, now],
+    ["DELETE FROM qr_challenges WHERE studio_id = ? AND expires_at < ?", ctx.studio.id, addMinutes(now, -60)],
+  ]);
   const win = checkinWindow(ctx.studio, s);
-  return { token: raw, expires_at: expires, rotate_seconds: rotate, window: win, session: getSession(ctx, s.id) };
+  return { token: raw, expires_at: expires, rotate_seconds: rotate, window: win, session: { ...s, status: s.status === "scheduled" ? ("open" as const) : s.status } };
 }
 
 /** Member self check-in: identity from the member session, class from the token (QR-API). */
-export function memberCheckIn(studio: Studio, contactId: string, challengeToken: string): CheckInResult {
+export async function memberCheckIn(studio: Studio, contactId: string, challengeToken: string): Promise<CheckInResult> {
   if (!challengeToken || challengeToken.length > 100) throw new AppError("validation", "הקוד אינו תקין. סרקו שוב.");
-  const ch = one<{ session_id: string; expires_at: string; revoked_at: string | null }>(
+  const ch = await one<{ session_id: string; expires_at: string; revoked_at: string | null }>(
     "SELECT session_id, expires_at, revoked_at FROM qr_challenges WHERE token_hash = ? AND studio_id = ?",
     sha256(challengeToken),
     studio.id,
   );
   if (!ch || ch.revoked_at) throw new AppError("blocked", "הקוד אינו תקף לסטודיו הזה. סרקו את הקוד שעל המסך.", { details: { reason: "invalid_code" } });
   // If already recorded for this class, return the same result even after the code rotated.
-  const already = one<{ id: string }>("SELECT id FROM attendance WHERE studio_id = ? AND contact_id = ? AND session_id = ? AND status <> 'reversed'", studio.id, contactId, ch.session_id);
+  const already = await one<{ id: string }>("SELECT id FROM attendance WHERE studio_id = ? AND contact_id = ? AND session_id = ? AND status <> 'reversed'", studio.id, contactId, ch.session_id);
   if (!already && ch.expires_at < nowIso()) throw new AppError("blocked", "הקוד פג תוקף. סרקו שוב את הקוד שעל המסך.", { details: { reason: "expired" } });
-  const s = one<{ start_at: string; status: string }>("SELECT start_at, status FROM class_sessions WHERE id = ?", ch.session_id)!;
+  const s = (await one<{ start_at: string; status: string }>("SELECT start_at, status FROM class_sessions WHERE id = ?", ch.session_id))!;
   const win = checkinWindow(studio, s);
   const now = nowIso();
   if (!already && (now < win.opensAt || now > win.closesAt)) {
@@ -451,7 +478,7 @@ export function memberCheckIn(studio: Studio, contactId: string, challengeToken:
   return commitCheckIn(studio, { contactId, sessionId: ch.session_id, channel: "qr", actorId: null });
 }
 
-export function attendanceForContact(studioId: string, contactId: string) {
+export async function attendanceForContact(studioId: string, contactId: string) {
   return all<{ id: string; session_title: string; start_at: string; status: string; channel: string; checked_in_at: string; plan_name: string | null }>(
     `SELECT a.id, s.title AS session_title, s.start_at, a.status, a.channel, a.checked_in_at, p.name AS plan_name
        FROM attendance a JOIN class_sessions s ON s.id = a.session_id
@@ -463,9 +490,9 @@ export function attendanceForContact(studioId: string, contactId: string) {
 }
 
 /** Roster CSV for a period (spec: export subject to permission; formula-safe). */
-export function exportAttendanceCsv(ctx: Ctx, fromIso: string, toIso: string, sessionId?: string) {
+export async function exportAttendanceCsv(ctx: Ctx, fromIso: string, toIso: string, sessionId?: string) {
   if (!can(ctx, "export") && !can(ctx, "attendance.correct")) throw new AppError("forbidden", "אין לך הרשאה לייצוא.");
-  const rows = all<{ title: string; start_at: string; name: string; status: string; channel: string; checked_in_at: string; plan: string | null }>(
+  const rows = await all<{ title: string; start_at: string; name: string; status: string; channel: string; checked_in_at: string; plan: string | null }>(
     `SELECT s.title, s.start_at, c.display_name AS name, a.status, a.channel, a.checked_in_at, p.name AS plan
        FROM attendance a JOIN class_sessions s ON s.id = a.session_id JOIN contacts c ON c.id = a.contact_id
        LEFT JOIN memberships m ON m.id = a.membership_id LEFT JOIN plans p ON p.id = m.plan_id
@@ -476,7 +503,7 @@ export function exportAttendanceCsv(ctx: Ctx, fromIso: string, toIso: string, se
     toIso,
     ...(sessionId ? [sessionId] : []),
   );
-  audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "attendance.exported", entity: "attendance", diff: { from: fromIso, to: toIso, rows: rows.length } });
+  await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "attendance.exported", entity: "attendance", diff: { from: fromIso, to: toIso, rows: rows.length } });
   return rows;
 }
 
@@ -484,31 +511,40 @@ export function exportAttendanceCsv(ctx: Ctx, fromIso: string, toIso: string, se
  * Minimal contact lookup for recording attendance (also used by instructors,
  * who have no CRM access): only names and eligible memberships are returned.
  */
-export function sessionCandidates(ctx: Ctx, sessionId: string, q: string) {
+export async function sessionCandidates(ctx: Ctx, sessionId: string, q: string) {
   assertCan(ctx, "attendance.record");
-  getSession(ctx, sessionId);
+  await getSession(ctx, sessionId);
   const term = q.trim();
   if (term.length < 2) return [];
   const digits = term.replace(/\D/g, "");
   const rows = digits.length >= 3
-    ? all<{ id: string; display_name: string }>(
+    ? await all<{ id: string; display_name: string }>(
         "SELECT id, display_name FROM contacts WHERE studio_id = ? AND merged_into IS NULL AND archived = 0 AND (phone_e164 LIKE ? OR phone_raw LIKE ?) ORDER BY display_name LIMIT 12",
         ctx.studio.id,
         `%${digits.replace(/^0/, "")}%`,
         `%${digits}%`,
       )
-    : all<{ id: string; display_name: string }>(
+    : await all<{ id: string; display_name: string }>(
         "SELECT id, display_name FROM contacts WHERE studio_id = ? AND merged_into IS NULL AND archived = 0 AND display_name LIKE ? ORDER BY display_name LIMIT 12",
         ctx.studio.id,
         `%${term}%`,
       );
-  return rows.map((r) => {
-    const attended = one<{ status: string }>("SELECT status FROM attendance WHERE studio_id = ? AND contact_id = ? AND session_id = ?", ctx.studio.id, r.id, sessionId);
+  if (!rows.length) return [];
+  const ids = rows.map((r) => r.id);
+  const attendedRows = await all<{ contact_id: string; status: string }>(
+    `SELECT contact_id, status FROM attendance WHERE studio_id = ? AND session_id = ? AND contact_id IN (${placeholders(ids.length)})`,
+    ctx.studio.id,
+    sessionId,
+    ...ids,
+  );
+  const attended = new Map(attendedRows.map((a) => [a.contact_id, a.status]));
+  const eligible = await Promise.all(rows.map((r) => eligibleMemberships(ctx.studio.id, r.id)));
+  return rows.map((r, i) => {
     return {
       id: r.id,
       display_name: r.display_name,
-      attendance_status: attended?.status ?? null,
-      memberships: eligibleMemberships(ctx.studio.id, r.id).map((m) => ({
+      attendance_status: attended.get(r.id) ?? null,
+      memberships: eligible[i].map((m) => ({
         id: m.id,
         plan_name: m.plan_name,
         plan_type: m.plan_type,
@@ -520,10 +556,10 @@ export function sessionCandidates(ctx: Ctx, sessionId: string, q: string) {
   });
 }
 
-export function sessionDeducted(studioId: string, attendanceId: string): boolean {
-  return !!one(
+export async function sessionDeducted(studioId: string, attendanceId: string): Promise<boolean> {
+  return !!(await one(
     "SELECT 1 FROM balance_entries d WHERE d.attendance_id = ? AND d.studio_id = ? AND d.kind = 'deduction' AND NOT EXISTS (SELECT 1 FROM balance_entries r WHERE r.reverses_id = d.id)",
     attendanceId,
     studioId,
-  );
+  ));
 }

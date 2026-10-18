@@ -1,4 +1,4 @@
-import { all, one, run, tx } from "../db";
+import { all, one, run, tx, placeholders } from "../db";
 import { AppError, conflict, invalid, notFound } from "../errors";
 import { assertCan, type Ctx } from "../permissions";
 import { audit } from "../audit";
@@ -56,14 +56,14 @@ export type MembershipView = MembershipRow & {
   contact_name?: string;
 };
 
-export function listPlans(studioId: string, includeInactive = false): Plan[] {
-  return all<Plan>(
+export async function listPlans(studioId: string, includeInactive = false): Promise<Plan[]> {
+  return await all<Plan>(
     `SELECT * FROM plans WHERE studio_id = ? ${includeInactive ? "" : "AND active = 1"} ORDER BY active DESC, name`,
     studioId,
   );
 }
 
-export function savePlan(
+export async function savePlan(
   ctx: Ctx,
   input: { id?: string; name?: string; type?: PlanType; sessions_granted?: number | null; validity_days?: number | null; price?: string | null; active?: boolean },
 ) {
@@ -83,7 +83,7 @@ export function savePlan(
   if (Object.keys(fields).length) throw invalid(fields);
   const now = nowIso();
   if (input.id) {
-    const res = run(
+    const res = await run(
       "UPDATE plans SET name = ?, type = ?, sessions_granted = ?, validity_days = ?, price = ?, active = ?, updated_at = ? WHERE id = ? AND studio_id = ?",
       name,
       type,
@@ -99,7 +99,7 @@ export function savePlan(
     return input.id;
   }
   const planId = id("pln");
-  run(
+  await run(
     "INSERT INTO plans (id, studio_id, name, type, sessions_granted, validity_days, price, deducts, active, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,1,?,?)",
     planId,
     ctx.studio.id,
@@ -131,45 +131,103 @@ export function computeStatus(m: Row, balance: number | null, pauses: { starts_a
   return { status, reasons: reasons.length ? reasons : (["active"] as MembershipStatus[]), pausedNow, eligible: status === "active" };
 }
 
-export function balanceOf(membershipId: string): number {
-  return one<{ b: number }>("SELECT COALESCE(SUM(delta), 0) AS b FROM balance_entries WHERE membership_id = ?", membershipId)!.b;
-}
-
-function usedOf(membershipId: string): number {
-  return one<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM balance_entries d WHERE d.membership_id = ? AND d.kind = 'deduction' AND NOT EXISTS (SELECT 1 FROM balance_entries r WHERE r.reverses_id = d.id)",
-    membershipId,
-  )!.n;
-}
-
-function view(row: Row, at?: string): MembershipView {
-  const usesBalance = row.plan_type !== "period";
-  const balance = !usesBalance ? null : row.authority === "local" ? balanceOf(row.id) : row.external_balance;
-  const pauses = all<{ id: string; starts_at: string; ends_at: string; reason: string | null }>(
-    "SELECT id, starts_at, ends_at, reason FROM membership_pauses WHERE membership_id = ? ORDER BY starts_at DESC",
-    row.id,
-  );
-  const s = computeStatus(row, balance, pauses, at);
-  return { ...row, balance, used: usedOf(row.id), status: s.status, reasons: s.reasons, eligible: s.eligible, paused_now: s.pausedNow, pauses };
+export async function balanceOf(membershipId: string): Promise<number> {
+  return (await one<{ b: number }>("SELECT COALESCE(SUM(delta), 0) AS b FROM balance_entries WHERE membership_id = ?", membershipId))!.b;
 }
 
 const BASE = `SELECT m.*, p.name AS plan_name, p.type AS plan_type, p.deducts AS plan_deducts, p.sessions_granted, c.display_name AS contact_name
   FROM memberships m JOIN plans p ON p.id = m.plan_id JOIN contacts c ON c.id = m.contact_id`;
 
-export function membershipsForContact(studioId: string, contactId: string): MembershipView[] {
-  return all<Row>(`${BASE} WHERE m.contact_id = ? AND m.studio_id = ? ORDER BY m.starts_at DESC`, contactId, studioId).map((r) => view(r));
+const CHUNK = 500;
+function chunks<T>(arr: T[], size = CHUNK): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
-export function getMembership(studioId: string, membershipId: string): MembershipView {
-  const row = one<Row>(`${BASE} WHERE m.id = ? AND m.studio_id = ?`, membershipId, studioId);
-  if (!row) throw notFound("המנוי");
-  return view(row);
+type PauseRow = { id: string; membership_id: string; starts_at: string; ends_at: string; reason: string | null };
+
+/** Computes views for already-loaded rows with 3 grouped queries (balances, used, pauses). */
+async function hydrateViews(studioId: string, rows: Row[], at?: string): Promise<MembershipView[]> {
+  if (!rows.length) return [];
+  const ids = rows.map((r) => r.id);
+  const balance = new Map<string, number>();
+  const used = new Map<string, number>();
+  const pauses = new Map<string, PauseRow[]>();
+  for (const part of chunks(ids)) {
+    const ph = placeholders(part.length);
+    const [b, u, p] = await Promise.all([
+      all<{ membership_id: string; b: number }>(
+        `SELECT membership_id, COALESCE(SUM(delta), 0) AS b FROM balance_entries WHERE studio_id = ? AND membership_id IN (${ph}) GROUP BY membership_id`,
+        studioId,
+        ...part,
+      ),
+      all<{ membership_id: string; n: number }>(
+        `SELECT d.membership_id, COUNT(*) AS n FROM balance_entries d
+          WHERE d.studio_id = ? AND d.membership_id IN (${ph}) AND d.kind = 'deduction'
+            AND NOT EXISTS (SELECT 1 FROM balance_entries r WHERE r.reverses_id = d.id)
+          GROUP BY d.membership_id`,
+        studioId,
+        ...part,
+      ),
+      all<PauseRow>(
+        `SELECT id, membership_id, starts_at, ends_at, reason FROM membership_pauses WHERE studio_id = ? AND membership_id IN (${ph}) ORDER BY starts_at DESC`,
+        studioId,
+        ...part,
+      ),
+    ]);
+    for (const r of b) balance.set(r.membership_id, r.b);
+    for (const r of u) used.set(r.membership_id, r.n);
+    for (const r of p) pauses.set(r.membership_id, [...(pauses.get(r.membership_id) ?? []), r]);
+  }
+  return rows.map((row) => {
+    const usesBalance = row.plan_type !== "period";
+    const bal = !usesBalance ? null : row.authority === "local" ? balance.get(row.id) ?? 0 : row.external_balance;
+    const ps = (pauses.get(row.id) ?? []).map(({ id: pid, starts_at, ends_at, reason }) => ({ id: pid, starts_at, ends_at, reason }));
+    const st = computeStatus(row, bal, ps, at);
+    return { ...row, balance: bal, used: used.get(row.id) ?? 0, status: st.status, reasons: st.reasons, eligible: st.eligible, paused_now: st.pausedNow, pauses: ps };
+  });
 }
 
-export function listMemberships(
+/**
+ * Bulk loader: a constant number of queries regardless of how many memberships
+ * (remote DB friendly). Without filters it loads the whole studio.
+ */
+export async function membershipViews(
+  studioId: string,
+  opts: { contactIds?: string[]; membershipIds?: string[]; at?: string } = {},
+): Promise<MembershipView[]> {
+  let rows: Row[] = [];
+  if (opts.contactIds) {
+    for (const part of chunks(opts.contactIds)) {
+      if (!part.length) continue;
+      rows.push(...(await all<Row>(`${BASE} WHERE m.studio_id = ? AND m.contact_id IN (${placeholders(part.length)}) ORDER BY m.starts_at DESC`, studioId, ...part)));
+    }
+  } else if (opts.membershipIds) {
+    for (const part of chunks(opts.membershipIds)) {
+      if (!part.length) continue;
+      rows.push(...(await all<Row>(`${BASE} WHERE m.studio_id = ? AND m.id IN (${placeholders(part.length)}) ORDER BY m.starts_at DESC`, studioId, ...part)));
+    }
+  } else {
+    rows = await all<Row>(`${BASE} WHERE m.studio_id = ? ORDER BY m.starts_at DESC`, studioId);
+  }
+  return hydrateViews(studioId, rows, opts.at);
+}
+
+export async function membershipsForContact(studioId: string, contactId: string): Promise<MembershipView[]> {
+  return membershipViews(studioId, { contactIds: [contactId] });
+}
+
+export async function getMembership(studioId: string, membershipId: string): Promise<MembershipView> {
+  const [m] = await membershipViews(studioId, { membershipIds: [membershipId] });
+  if (!m) throw notFound("המנוי");
+  return m;
+}
+
+export async function listMemberships(
   ctx: Ctx,
   f: { status?: string; q?: string; plan?: string; page?: number },
-): { items: MembershipView[]; total: number } {
+): Promise<{ items: MembershipView[]; total: number }> {
   assertCan(ctx, "memberships.view");
   const where = ["m.studio_id = ?", "c.merged_into IS NULL"];
   const params: unknown[] = [ctx.studio.id];
@@ -181,7 +239,8 @@ export function listMemberships(
     where.push("m.plan_id = ?");
     params.push(f.plan);
   }
-  const rows = all<Row>(`${BASE} WHERE ${where.join(" AND ")} ORDER BY COALESCE(m.ends_at, '9999') ASC LIMIT 2000`, ...params).map((r) => view(r));
+  const base = await all<Row>(`${BASE} WHERE ${where.join(" AND ")} ORDER BY COALESCE(m.ends_at, '9999') ASC LIMIT 2000`, ...params);
+  const rows = await hydrateViews(ctx.studio.id, base);
   let items = rows;
   if (f.status === "ending") {
     const soon = new Date(Date.now() + 7 * 86_400_000).toISOString();
@@ -193,11 +252,11 @@ export function listMemberships(
 }
 
 /** Membership the attendance should use: staff choice, or the single eligible one (MEM-01). */
-export function eligibleMemberships(studioId: string, contactId: string, at?: string): MembershipView[] {
-  return membershipsForContact(studioId, contactId).filter((m) => computeStatus(m, m.balance, m.pauses, at).eligible);
+export async function eligibleMemberships(studioId: string, contactId: string, at?: string): Promise<MembershipView[]> {
+  return (await membershipsForContact(studioId, contactId)).filter((m) => computeStatus(m, m.balance, m.pauses, at).eligible);
 }
 
-export function createMembership(
+export async function createMembership(
   ctx: Ctx,
   input: { contact_id?: string; plan_id?: string; start_date?: string; end_date?: string | null; sessions?: number | null; reference?: string | null; renewed_from?: string | null },
 ) {
@@ -207,8 +266,8 @@ export function createMembership(
   if (!input.plan_id) fields.plan_id = "בחרו מסלול.";
   if (!input.start_date || !/^\d{4}-\d{2}-\d{2}$/.test(input.start_date)) fields.start_date = "בחרו תאריך התחלה.";
   if (Object.keys(fields).length) throw invalid(fields);
-  const contact = getContact(ctx, input.contact_id!);
-  const plan = one<Plan>("SELECT * FROM plans WHERE id = ? AND studio_id = ?", input.plan_id, ctx.studio.id);
+  const contact = await getContact(ctx, input.contact_id!);
+  const plan = await one<Plan>("SELECT * FROM plans WHERE id = ? AND studio_id = ?", input.plan_id, ctx.studio.id);
   if (!plan) throw invalid({ plan_id: "המסלול לא נמצא." });
   const tz = ctx.studio.timezone;
   const startsAt = startOfLocalDay(input.start_date!, tz).toISOString();
@@ -219,13 +278,13 @@ export function createMembership(
   const sessions = plan.type === "period" ? null : Math.floor(Number(input.sessions ?? plan.sessions_granted ?? 1));
   if (sessions !== null && (!sessions || sessions < 1)) throw invalid({ sessions: "מספר שיעורים לא תקין." });
   if (input.renewed_from) {
-    const prev = one("SELECT 1 FROM memberships WHERE id = ? AND contact_id = ? AND studio_id = ?", input.renewed_from, contact.id, ctx.studio.id);
+    const prev = await one("SELECT 1 FROM memberships WHERE id = ? AND contact_id = ? AND studio_id = ?", input.renewed_from, contact.id, ctx.studio.id);
     if (!prev) throw invalid({ renewed_from: "המנוי הקודם לא נמצא." });
   }
   const now = nowIso();
   const membershipId = id("mem");
-  tx(() => {
-    run(
+  await tx(async () => {
+    await run(
       `INSERT INTO memberships (id, studio_id, contact_id, plan_id, authority, starts_at, ends_at, renewed_from, reference, created_by, created_at, updated_at)
        VALUES (?,?,?,?, 'local', ?,?,?,?,?,?,?)`,
       membershipId,
@@ -241,7 +300,7 @@ export function createMembership(
       now,
     );
     if (sessions !== null) {
-      run(
+      await run(
         "INSERT INTO balance_entries (id, studio_id, membership_id, kind, delta, reason, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
         id("bal"),
         ctx.studio.id,
@@ -254,12 +313,12 @@ export function createMembership(
       );
     }
     if (plan.type !== "trial" && ["new_lead", "contacted", "trial_scheduled", "trial_attended", "decision_pending", "lost"].includes(contact.pipeline_stage)) {
-      run(
+      await run(
         "UPDATE contacts SET pipeline_stage = 'converted', stage_reason = NULL, version = version + 1, updated_at = ? WHERE id = ?",
         now,
         contact.id,
       );
-      run(
+      await run(
         "INSERT INTO stage_changes (id, studio_id, contact_id, from_stage, to_stage, reason, actor_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
         id("stg"),
         ctx.studio.id,
@@ -272,7 +331,7 @@ export function createMembership(
       );
     }
     if (input.renewed_from || plan.type !== "trial") {
-      run(
+      await run(
         "INSERT INTO interaction_events (id, studio_id, contact_id, channel, event_type, evidence_type, note, occurred_at, actor_id) VALUES (?,?,?,?,?,?,?,?,?)",
         id("evt"),
         ctx.studio.id,
@@ -286,35 +345,35 @@ export function createMembership(
       );
     }
     // A documented renewal cancels stale renewal reasons and their drafts (AC-07).
-    run(
+    await run(
       "UPDATE suggestions SET status = 'superseded', status_reason = 'renewed', updated_at = ? WHERE contact_id = ? AND studio_id = ? AND rule_id IN ('R03','R04','R07','R02') AND status IN ('active','snoozed')",
       now,
       contact.id,
       ctx.studio.id,
     );
-    run(
+    await run(
       "UPDATE tasks SET status = 'superseded', version = version + 1, updated_at = ? WHERE contact_id = ? AND studio_id = ? AND reason_code IN ('R03','R04','R07','R02') AND status IN ('open','in_progress','snoozed')",
       now,
       contact.id,
       ctx.studio.id,
     );
-    invalidateDrafts(ctx.studio.id, contact.id, "membership_changed");
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: input.renewed_from ? "membership.renewed" : "membership.created", entity: "membership", entityId: membershipId, diff: { plan: plan.name, sessions, start: input.start_date, end: endDate } });
+    await invalidateDrafts(ctx.studio.id, contact.id, "membership_changed");
+    await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: input.renewed_from ? "membership.renewed" : "membership.created", entity: "membership", entityId: membershipId, diff: { plan: plan.name, sessions, start: input.start_date, end: endDate } });
   });
-  return getMembership(ctx.studio.id, membershipId);
+  return await getMembership(ctx.studio.id, membershipId);
 }
 
-export function adjustBalance(ctx: Ctx, membershipId: string, delta: number, reason: string) {
+export async function adjustBalance(ctx: Ctx, membershipId: string, delta: number, reason: string) {
   assertCan(ctx, "balance.adjust");
-  const m = getMembership(ctx.studio.id, membershipId);
+  const m = await getMembership(ctx.studio.id, membershipId);
   if (m.authority !== "local") throw new AppError("blocked", "היתרה מנוהלת במערכת חיצונית ולא ניתן לשנות אותה כאן.");
   if (m.balance === null) throw new AppError("blocked", "למסלול הזה אין יתרת שיעורים.");
   const d = Math.trunc(Number(delta));
   if (!d || Math.abs(d) > 500) throw invalid({ delta: "בחרו כמה שיעורים להוסיף או להוריד." });
   if (!reason?.trim()) throw invalid({ reason: "כתבו סיבה להתאמה." });
   if (m.balance + d < 0) throw invalid({ delta: "היתרה לא יכולה לרדת מתחת לאפס." });
-  tx(() => {
-    run(
+  await tx(async () => {
+    await run(
       "INSERT INTO balance_entries (id, studio_id, membership_id, kind, delta, reason, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
       id("bal"),
       ctx.studio.id,
@@ -325,15 +384,15 @@ export function adjustBalance(ctx: Ctx, membershipId: string, delta: number, rea
       ctx.userId,
       nowIso(),
     );
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "balance.adjusted", entity: "membership", entityId: membershipId, reason: reason.trim(), diff: { delta: d, before: m.balance, after: (m.balance ?? 0) + d } });
-    invalidateDrafts(ctx.studio.id, m.contact_id, "membership_changed");
+    await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "balance.adjusted", entity: "membership", entityId: membershipId, reason: reason.trim(), diff: { delta: d, before: m.balance, after: (m.balance ?? 0) + d } });
+    await invalidateDrafts(ctx.studio.id, m.contact_id, "membership_changed");
   });
-  return getMembership(ctx.studio.id, membershipId);
+  return await getMembership(ctx.studio.id, membershipId);
 }
 
-export function pauseMembership(ctx: Ctx, membershipId: string, startDate: string, endDate: string, reason: string, extend: boolean) {
+export async function pauseMembership(ctx: Ctx, membershipId: string, startDate: string, endDate: string, reason: string, extend: boolean) {
   assertCan(ctx, "memberships.manage");
-  const m = getMembership(ctx.studio.id, membershipId);
+  const m = await getMembership(ctx.studio.id, membershipId);
   if (m.status === "cancelled" || m.status === "expired") throw new AppError("blocked", "אי אפשר להקפיא מנוי שהסתיים.");
   const tz = ctx.studio.timezone;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate) || endDate < startDate) {
@@ -342,8 +401,8 @@ export function pauseMembership(ctx: Ctx, membershipId: string, startDate: strin
   const startsAt = startOfLocalDay(startDate, tz).toISOString();
   const endsAt = endDateToExclusive(endDate, tz);
   const days = Math.round((Date.parse(endsAt) - Date.parse(startsAt)) / 86_400_000);
-  tx(() => {
-    run(
+  await tx(async () => {
+    await run(
       "INSERT INTO membership_pauses (id, studio_id, membership_id, starts_at, ends_at, reason, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
       id("pau"),
       ctx.studio.id,
@@ -356,26 +415,26 @@ export function pauseMembership(ctx: Ctx, membershipId: string, startDate: strin
     );
     // Extension of the end date is an explicit owner choice (D07), never automatic.
     if (extend && m.ends_at) {
-      run(
+      await run(
         "UPDATE memberships SET ends_at = ?, version = version + 1, updated_at = ? WHERE id = ?",
         new Date(Date.parse(m.ends_at) + days * 86_400_000).toISOString(),
         nowIso(),
         membershipId,
       );
     }
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "membership.paused", entity: "membership", entityId: membershipId, reason, diff: { startDate, endDate, extendedDays: extend ? days : 0 } });
-    invalidateDrafts(ctx.studio.id, m.contact_id, "membership_changed");
+    await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "membership.paused", entity: "membership", entityId: membershipId, reason, diff: { startDate, endDate, extendedDays: extend ? days : 0 } });
+    await invalidateDrafts(ctx.studio.id, m.contact_id, "membership_changed");
   });
-  return getMembership(ctx.studio.id, membershipId);
+  return await getMembership(ctx.studio.id, membershipId);
 }
 
-export function cancelMembership(ctx: Ctx, membershipId: string, version: number, reason: string) {
+export async function cancelMembership(ctx: Ctx, membershipId: string, version: number, reason: string) {
   assertCan(ctx, "memberships.manage");
-  const m = getMembership(ctx.studio.id, membershipId);
+  const m = await getMembership(ctx.studio.id, membershipId);
   if (!reason?.trim()) throw invalid({ reason: "כתבו סיבה לביטול." });
   if (m.version !== version) throw conflict();
-  tx(() => {
-    const res = run(
+  await tx(async () => {
+    const res = await run(
       "UPDATE memberships SET cancelled_at = ?, cancel_reason = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND cancelled_at IS NULL",
       nowIso(),
       reason.trim(),
@@ -384,14 +443,14 @@ export function cancelMembership(ctx: Ctx, membershipId: string, version: number
       version,
     );
     if (res.changes !== 1) throw conflict();
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "membership.cancelled", entity: "membership", entityId: membershipId, reason });
-    invalidateDrafts(ctx.studio.id, m.contact_id, "membership_changed");
+    await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "membership.cancelled", entity: "membership", entityId: membershipId, reason });
+    await invalidateDrafts(ctx.studio.id, m.contact_id, "membership_changed");
   });
-  return getMembership(ctx.studio.id, membershipId);
+  return await getMembership(ctx.studio.id, membershipId);
 }
 
-export function balanceLedger(studioId: string, membershipId: string) {
-  return all<{ id: string; kind: string; delta: number; reason: string | null; created_at: string; actor: string | null; attendance_id: string | null; session_title: string | null }>(
+export async function balanceLedger(studioId: string, membershipId: string) {
+  return await all<{ id: string; kind: string; delta: number; reason: string | null; created_at: string; actor: string | null; attendance_id: string | null; session_title: string | null }>(
     `SELECT b.id, b.kind, b.delta, b.reason, b.created_at, u.name AS actor, b.attendance_id, cs.title AS session_title
        FROM balance_entries b
        LEFT JOIN users u ON u.id = b.created_by

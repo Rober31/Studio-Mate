@@ -64,10 +64,10 @@ const SELECT = `SELECT c.*, u.name AS owner_name, p.allowed AS allowed, p.reason
   LEFT JOIN contact_preferences p ON p.contact_id = c.id AND p.channel = 'whatsapp'`;
 
 /** Loads a contact the user may see; 404 otherwise (AC-12: no content leak). */
-export function getContact(ctx: Ctx, contactId: string): Contact {
+export async function getContact(ctx: Ctx, contactId: string): Promise<Contact> {
   assertCan(ctx, "contacts.view");
   const scope = contactScopeSql(ctx);
-  const row = one<ContactRow>(
+  const row = await one<ContactRow>(
     `${SELECT} WHERE c.id = ? AND c.studio_id = ? AND ${scope.sql}`,
     contactId,
     ctx.studio.id,
@@ -78,8 +78,8 @@ export function getContact(ctx: Ctx, contactId: string): Contact {
 }
 
 /** Minimal lookup for attendance screens (instructor role). */
-export function getContactBasic(studioId: string, contactId: string) {
-  return one<{ id: string; display_name: string }>(
+export async function getContactBasic(studioId: string, contactId: string) {
+  return await one<{ id: string; display_name: string }>(
     "SELECT id, display_name FROM contacts WHERE id = ? AND studio_id = ? AND merged_into IS NULL",
     contactId,
     studioId,
@@ -99,7 +99,7 @@ export type ContactFilters = {
   pageSize?: number;
 };
 
-export function listContacts(ctx: Ctx, f: ContactFilters) {
+export async function listContacts(ctx: Ctx, f: ContactFilters) {
   assertCan(ctx, "contacts.view");
   const scope = contactScopeSql(ctx);
   const where: string[] = ["c.studio_id = ?", "c.merged_into IS NULL", scope.sql];
@@ -149,8 +149,8 @@ export function listContacts(ctx: Ctx, f: ContactFilters) {
   }
   const pageSize = Math.min(Math.max(f.pageSize ?? 30, 1), 100);
   const page = Math.max(f.page ?? 1, 1);
-  const total = one<{ n: number }>(`SELECT COUNT(*) AS n FROM contacts c WHERE ${where.join(" AND ")}`, ...params)!.n;
-  const rows = all<ContactRow>(
+  const total = (await one<{ n: number }>(`SELECT COUNT(*) AS n FROM contacts c WHERE ${where.join(" AND ")}`, ...params))!.n;
+  const rows = await all<ContactRow>(
     `${SELECT} WHERE ${where.join(" AND ")} ORDER BY c.updated_at DESC LIMIT ? OFFSET ?`,
     ...params,
     pageSize,
@@ -159,8 +159,8 @@ export function listContacts(ctx: Ctx, f: ContactFilters) {
   return { items: rows.map(hydrate), total, page, pageSize };
 }
 
-export function findByPhone(studioId: string, e164: string, excludeId?: string) {
-  return all<{ id: string; display_name: string; pipeline_stage: string }>(
+export async function findByPhone(studioId: string, e164: string, excludeId?: string) {
+  return await all<{ id: string; display_name: string; pipeline_stage: string }>(
     "SELECT id, display_name, pipeline_stage FROM contacts WHERE studio_id = ? AND phone_e164 = ? AND merged_into IS NULL AND (? IS NULL OR id <> ?)",
     studioId,
     e164,
@@ -182,9 +182,9 @@ export type ContactInput = {
   allow_duplicate?: boolean;
 };
 
-function validateOwner(ctx: Ctx, ownerId: string | null | undefined) {
+async function validateOwner(ctx: Ctx, ownerId: string | null | undefined) {
   if (!ownerId) return;
-  const okOwner = one(
+  const okOwner = await one(
     "SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1",
     ctx.studio.id,
     ownerId,
@@ -194,7 +194,7 @@ function validateOwner(ctx: Ctx, ownerId: string | null | undefined) {
 
 const LANGS = new Set(["he", "ar", "en"]);
 
-export function createContact(ctx: Ctx, input: ContactInput, opts: { source?: string; actorId?: string | null } = {}) {
+export async function createContact(ctx: Ctx, input: ContactInput, opts: { source?: string; actorId?: string | null } = {}) {
   assertCan(ctx, "contacts.edit");
   const name = (input.display_name ?? "").trim();
   const fields: Record<string, string> = {};
@@ -204,19 +204,19 @@ export function createContact(ctx: Ctx, input: ContactInput, opts: { source?: st
   if (input.phone && !phone.valid) fields.phone = "מספר הטלפון לא נראה תקין. בדקו שוב.";
   if (input.preferred_language && !LANGS.has(input.preferred_language)) fields.preferred_language = "שפה לא נתמכת.";
   if (Object.keys(fields).length) throw invalid(fields);
-  validateOwner(ctx, input.owner_id);
+  await validateOwner(ctx, input.owner_id);
 
   if (phone.e164 && !input.allow_duplicate) {
-    const dupes = findByPhone(ctx.studio.id, phone.e164);
+    const dupes = await findByPhone(ctx.studio.id, phone.e164);
     if (dupes.length) {
       throw new AppError("conflict", "כבר יש לקוח עם מספר הטלפון הזה.", { details: { duplicates: dupes } });
     }
   }
   const now = nowIso();
   const contactId = id("con");
-  const isDuplicate = !!(phone.e164 && findByPhone(ctx.studio.id, phone.e164).length);
-  tx(() => {
-    run(
+  const isDuplicate = !!(phone.e164 && (await findByPhone(ctx.studio.id, phone.e164)).length);
+  await tx(async () => {
+    await run(
       `INSERT INTO contacts (id, studio_id, display_name, phone_e164, phone_raw, phone_valid, preferred_language, gender_form,
         pipeline_stage, owner_id, source, interest, tags, needs_review, review_reason, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -238,7 +238,7 @@ export function createContact(ctx: Ctx, input: ContactInput, opts: { source?: st
       now,
       now,
     );
-    run(
+    await run(
       "INSERT INTO stage_changes (id, studio_id, contact_id, from_stage, to_stage, actor_id, created_at) VALUES (?,?,?,?,?,?,?)",
       id("stg"),
       ctx.studio.id,
@@ -250,7 +250,7 @@ export function createContact(ctx: Ctx, input: ContactInput, opts: { source?: st
     );
     if (input.note?.trim()) addNoteRaw(ctx.studio.id, contactId, input.note.trim(), ctx.userId, false);
   });
-  return getContact(ctx, contactId);
+  return await getContact(ctx, contactId);
 }
 
 export type ContactPatch = ContactInput & {
@@ -263,9 +263,9 @@ export type ContactPatch = ContactInput & {
 
 const CLOSING = new Set<Stage>(["lost"]);
 
-export function updateContact(ctx: Ctx, contactId: string, patch: ContactPatch) {
+export async function updateContact(ctx: Ctx, contactId: string, patch: ContactPatch) {
   assertCan(ctx, "contacts.edit");
-  const current = getContact(ctx, contactId);
+  const current = await getContact(ctx, contactId);
   if (typeof patch.version !== "number") throw invalid({ version: "חסרה גרסה." });
   if (patch.version !== current.version) throw conflict();
 
@@ -291,7 +291,7 @@ export function updateContact(ctx: Ctx, contactId: string, patch: ContactPatch) 
     if (patch.phone && !phone.valid) fields.phone = "מספר הטלפון לא נראה תקין. בדקו שוב.";
     else if (phone.e164 !== current.phone_e164) {
       if (phone.e164 && !patch.allow_duplicate) {
-        const dupes = findByPhone(ctx.studio.id, phone.e164, contactId);
+        const dupes = await findByPhone(ctx.studio.id, phone.e164, contactId);
         if (dupes.length) throw new AppError("conflict", "כבר יש לקוח עם מספר הטלפון הזה.", { details: { duplicates: dupes } });
       }
       set("phone_e164", phone.e164);
@@ -306,7 +306,7 @@ export function updateContact(ctx: Ctx, contactId: string, patch: ContactPatch) 
   }
   if (patch.gender_form !== undefined) set("gender_form", patch.gender_form === "f" || patch.gender_form === "m" ? patch.gender_form : null);
   if (patch.owner_id !== undefined) {
-    validateOwner(ctx, patch.owner_id);
+    await validateOwner(ctx, patch.owner_id);
     set("owner_id", patch.owner_id || null);
   }
   if (patch.source !== undefined) set("source", patch.source || "manual");
@@ -327,7 +327,7 @@ export function updateContact(ctx: Ctx, contactId: string, patch: ContactPatch) 
       fields.stage_reason = reopening ? "כתבו למה פותחים מחדש." : "כתבו סיבה קצרה לסגירה.";
     }
     if (patch.pipeline_stage === "converted") {
-      const hasMembership = one(
+      const hasMembership = await one(
         "SELECT 1 FROM memberships WHERE contact_id = ? AND studio_id = ? AND cancelled_at IS NULL",
         contactId,
         ctx.studio.id,
@@ -344,8 +344,8 @@ export function updateContact(ctx: Ctx, contactId: string, patch: ContactPatch) 
   if (!sets.length) return current;
 
   const now = nowIso();
-  tx(() => {
-    const res = run(
+  await tx(async () => {
+    const res = await run(
       `UPDATE contacts SET ${sets.join(", ")}, version = version + 1, updated_at = ? WHERE id = ? AND studio_id = ? AND version = ?`,
       ...params,
       now,
@@ -355,7 +355,7 @@ export function updateContact(ctx: Ctx, contactId: string, patch: ContactPatch) 
     );
     if (res.changes !== 1) throw conflict();
     if (stageChange) {
-      run(
+      await run(
         "INSERT INTO stage_changes (id, studio_id, contact_id, from_stage, to_stage, reason, actor_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
         id("stg"),
         ctx.studio.id,
@@ -368,12 +368,12 @@ export function updateContact(ctx: Ctx, contactId: string, patch: ContactPatch) 
       );
     }
     if (phoneChanged) {
-      audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "contact.phone_changed", entity: "contact", entityId: contactId, diff: { phone: diff.phone_e164 } });
-      invalidateDrafts(ctx.studio.id, contactId, "phone_changed");
+      await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "contact.phone_changed", entity: "contact", entityId: contactId, diff: { phone: diff.phone_e164 } });
+      await invalidateDrafts(ctx.studio.id, contactId, "phone_changed");
     }
     if (patch.owner_id !== undefined && diff.owner_id) {
       // Reassignment moves open tasks without duplicating them.
-      run(
+      await run(
         "UPDATE tasks SET assignee_id = ?, version = version + 1, updated_at = ? WHERE contact_id = ? AND studio_id = ? AND status IN ('open','in_progress','snoozed') AND (assignee_id IS NULL OR assignee_id = ?)",
         patch.owner_id || null,
         now,
@@ -383,11 +383,11 @@ export function updateContact(ctx: Ctx, contactId: string, patch: ContactPatch) 
       );
     }
   });
-  return getContact(ctx, contactId);
+  return await getContact(ctx, contactId);
 }
 
-export function invalidateDrafts(studioId: string, contactId: string, reason: string) {
-  run(
+export async function invalidateDrafts(studioId: string, contactId: string, reason: string) {
+  await run(
     "UPDATE message_drafts SET status = 'invalidated', invalid_reason = ?, updated_at = ? WHERE studio_id = ? AND contact_id = ? AND status IN ('ready','edited')",
     reason,
     nowIso(),
@@ -397,7 +397,7 @@ export function invalidateDrafts(studioId: string, contactId: string, reason: st
 }
 
 /** Do-not-contact and channel preference (spec Customer Profile, AC-06). */
-export function setContactPreference(
+export async function setContactPreference(
   ctx: Ctx,
   contactId: string,
   allowed: boolean,
@@ -405,10 +405,10 @@ export function setContactPreference(
   source = "staff",
 ) {
   assertCan(ctx, "contacts.edit");
-  getContact(ctx, contactId);
-  setPreferenceRaw(ctx.studio.id, contactId, allowed, reason, source, ctx.userId, null);
+  await getContact(ctx, contactId);
+  await setPreferenceRaw(ctx.studio.id, contactId, allowed, reason, source, ctx.userId, null);
   if (!allowed) invalidateDrafts(ctx.studio.id, contactId, "contact_blocked");
-  audit({
+  await audit({
     studioId: ctx.studio.id,
     actorId: ctx.userId,
     action: allowed ? "preference.allowed" : "preference.blocked",
@@ -418,7 +418,7 @@ export function setContactPreference(
   });
 }
 
-export function setPreferenceRaw(
+export async function setPreferenceRaw(
   studioId: string,
   contactId: string,
   allowed: boolean,
@@ -428,7 +428,7 @@ export function setPreferenceRaw(
   noticeVersion: string | null,
 ) {
   const now = nowIso();
-  run(
+  await run(
     `INSERT INTO contact_preferences (contact_id, studio_id, channel, allowed, reason, source, updated_by, updated_at)
      VALUES (?,?, 'whatsapp', ?,?,?,?,?)
      ON CONFLICT(contact_id, channel) DO UPDATE SET allowed = excluded.allowed, reason = excluded.reason, source = excluded.source, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
@@ -440,7 +440,7 @@ export function setPreferenceRaw(
     actorId,
     now,
   );
-  run(
+  await run(
     "INSERT INTO consent_events (id, studio_id, contact_id, channel, allowed, source, notice_version, reason, actor_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
     id("cns"),
     studioId,
@@ -455,8 +455,8 @@ export function setPreferenceRaw(
   );
 }
 
-function addNoteRaw(studioId: string, contactId: string, body: string, authorId: string | null, isPrivate: boolean) {
-  run(
+async function addNoteRaw(studioId: string, contactId: string, body: string, authorId: string | null, isPrivate: boolean) {
+  await run(
     "INSERT INTO notes (id, studio_id, contact_id, body, is_private, author_id, created_at) VALUES (?,?,?,?,?,?,?)",
     id("not"),
     studioId,
@@ -468,16 +468,16 @@ function addNoteRaw(studioId: string, contactId: string, body: string, authorId:
   );
 }
 
-export function addNote(ctx: Ctx, contactId: string, body: string, isPrivate: boolean) {
+export async function addNote(ctx: Ctx, contactId: string, body: string, isPrivate: boolean) {
   assertCan(ctx, "contacts.edit");
-  getContact(ctx, contactId);
+  await getContact(ctx, contactId);
   if (!body.trim()) throw invalid({ body: "ההערה ריקה." });
-  addNoteRaw(ctx.studio.id, contactId, body.trim(), ctx.userId, isPrivate);
+  await addNoteRaw(ctx.studio.id, contactId, body.trim(), ctx.userId, isPrivate);
 }
 
-export function listNotes(ctx: Ctx, contactId: string) {
-  getContact(ctx, contactId);
-  return all<{ id: string; body: string; is_private: number; author_name: string | null; created_at: string }>(
+export async function listNotes(ctx: Ctx, contactId: string) {
+  await getContact(ctx, contactId);
+  return await all<{ id: string; body: string; is_private: number; author_name: string | null; created_at: string }>(
     "SELECT n.id, n.body, n.is_private, u.name AS author_name, n.created_at FROM notes n LEFT JOIN users u ON u.id = n.author_id WHERE n.contact_id = ? AND n.studio_id = ? ORDER BY n.created_at DESC",
     contactId,
     ctx.studio.id,
@@ -486,32 +486,32 @@ export function listNotes(ctx: Ctx, contactId: string) {
 
 export type TimelineItem = { at: string; kind: string; title: string; detail?: string | null; actor?: string | null };
 
-export function contactTimeline(ctx: Ctx, contactId: string): TimelineItem[] {
-  getContact(ctx, contactId);
+export async function contactTimeline(ctx: Ctx, contactId: string): Promise<TimelineItem[]> {
+  await getContact(ctx, contactId);
   const sid = ctx.studio.id;
   const items: TimelineItem[] = [];
-  for (const s of all<{ created_at: string; from_stage: string | null; to_stage: string; reason: string | null; actor: string | null }>(
+  for (const s of await all<{ created_at: string; from_stage: string | null; to_stage: string; reason: string | null; actor: string | null }>(
     "SELECT s.created_at, s.from_stage, s.to_stage, s.reason, u.name AS actor FROM stage_changes s LEFT JOIN users u ON u.id = s.actor_id WHERE s.contact_id = ? AND s.studio_id = ?",
     contactId,
     sid,
   )) {
     items.push({ at: s.created_at, kind: "stage", title: s.from_stage ? `stage:${s.from_stage}>${s.to_stage}` : `stage:created`, detail: s.reason, actor: s.actor });
   }
-  for (const e of all<{ occurred_at: string; event_type: string; outcome: string | null; note: string | null; channel: string; actor: string | null }>(
+  for (const e of await all<{ occurred_at: string; event_type: string; outcome: string | null; note: string | null; channel: string; actor: string | null }>(
     "SELECT e.occurred_at, e.event_type, e.outcome, e.note, e.channel, u.name AS actor FROM interaction_events e LEFT JOIN users u ON u.id = e.actor_id WHERE e.contact_id = ? AND e.studio_id = ?",
     contactId,
     sid,
   )) {
     items.push({ at: e.occurred_at, kind: "interaction", title: `event:${e.event_type}${e.outcome ? `:${e.outcome}` : ""}`, detail: e.note, actor: e.actor });
   }
-  for (const n of all<{ created_at: string; body: string; actor: string | null }>(
+  for (const n of await all<{ created_at: string; body: string; actor: string | null }>(
     "SELECT n.created_at, n.body, u.name AS actor FROM notes n LEFT JOIN users u ON u.id = n.author_id WHERE n.contact_id = ? AND n.studio_id = ?",
     contactId,
     sid,
   )) {
     items.push({ at: n.created_at, kind: "note", title: "note", detail: n.body, actor: n.actor });
   }
-  for (const c of all<{ created_at: string; allowed: number; reason: string | null; source: string; actor: string | null }>(
+  for (const c of await all<{ created_at: string; allowed: number; reason: string | null; source: string; actor: string | null }>(
     "SELECT c.created_at, c.allowed, c.reason, c.source, u.name AS actor FROM consent_events c LEFT JOIN users u ON u.id = c.actor_id WHERE c.contact_id = ? AND c.studio_id = ?",
     contactId,
     sid,
@@ -522,7 +522,7 @@ export function contactTimeline(ctx: Ctx, contactId: string): TimelineItem[] {
 }
 
 /** Merge preview: both records + chosen values. Moves tasks, notes, memberships, attendance and history (spec CRM-03). */
-export function mergeContacts(
+export async function mergeContacts(
   ctx: Ctx,
   keepId: string,
   dropId: string,
@@ -531,19 +531,19 @@ export function mergeContacts(
 ) {
   assertCan(ctx, "contacts.merge");
   if (keepId === dropId) throw invalid({ drop_id: "בחרו שני תיקים שונים." });
-  const keep = getContact(ctx, keepId);
-  const drop = getContact(ctx, dropId);
+  const keep = await getContact(ctx, keepId);
+  const drop = await getContact(ctx, dropId);
   const sid = ctx.studio.id;
   const now = nowIso();
   const name = choose.display_name === "drop" ? drop.display_name : keep.display_name;
   const phoneFrom = choose.phone === "drop" ? drop : keep;
   const owner = choose.owner === "drop" ? drop.owner_id : keep.owner_id;
-  tx(() => {
+  await tx(async () => {
     for (const table of ["tasks", "notes", "memberships", "interaction_events", "suggestions", "message_drafts", "registrations", "member_activations", "member_sessions", "stage_changes", "consent_events"]) {
-      run(`UPDATE ${table} SET contact_id = ? WHERE contact_id = ? AND studio_id = ?`, keepId, dropId, sid);
+      await run(`UPDATE ${table} SET contact_id = ? WHERE contact_id = ? AND studio_id = ?`, keepId, dropId, sid);
     }
     // Attendance is unique per person+session: keep the existing row on conflict.
-    run(
+    await run(
       "UPDATE attendance SET contact_id = ? WHERE contact_id = ? AND studio_id = ? AND session_id NOT IN (SELECT session_id FROM attendance WHERE contact_id = ?)",
       keepId,
       dropId,
@@ -551,7 +551,7 @@ export function mergeContacts(
       keepId,
     );
     const tags = Array.from(new Set([...keep.tags, ...drop.tags]));
-    run(
+    await run(
       `UPDATE contacts SET display_name = ?, phone_e164 = ?, phone_raw = ?, phone_valid = ?, owner_id = ?, tags = ?,
          external_id = COALESCE(external_id, ?), needs_review = 0, review_reason = NULL, version = version + 1, updated_at = ?
        WHERE id = ? AND studio_id = ?`,
@@ -566,7 +566,7 @@ export function mergeContacts(
       keepId,
       sid,
     );
-    run(
+    await run(
       "UPDATE contacts SET merged_into = ?, archived = 1, external_id = NULL, version = version + 1, updated_at = ? WHERE id = ? AND studio_id = ?",
       keepId,
       now,
@@ -576,22 +576,22 @@ export function mergeContacts(
     // A block on either record stays in force.
     const blocked = !keep.contact_allowed || !drop.contact_allowed;
     if (blocked && keep.contact_allowed) {
-      setPreferenceRaw(sid, keepId, false, drop.contact_block_reason ?? "merged", "merge", ctx.userId, null);
+      await setPreferenceRaw(sid, keepId, false, drop.contact_block_reason ?? "merged", "merge", ctx.userId, null);
     }
-    audit({ studioId: sid, actorId: ctx.userId, action: "contact.merged", entity: "contact", entityId: keepId, reason, diff: { merged: dropId, keep: keep.display_name, drop: drop.display_name } });
+    await audit({ studioId: sid, actorId: ctx.userId, action: "contact.merged", entity: "contact", entityId: keepId, reason, diff: { merged: dropId, keep: keep.display_name, drop: drop.display_name } });
   });
-  return getContact(ctx, keepId);
+  return await getContact(ctx, keepId);
 }
 
-export function staffList(studioId: string) {
-  return all<{ id: string; name: string; role: string }>(
+export async function staffList(studioId: string) {
+  return await all<{ id: string; name: string; role: string }>(
     "SELECT u.id, u.name, m.role FROM staff_memberships m JOIN users u ON u.id = m.user_id WHERE m.studio_id = ? AND m.active = 1 ORDER BY u.name",
     studioId,
   );
 }
 
-export function allTags(studioId: string): string[] {
-  return all<{ value: string }>(
+export async function allTags(studioId: string): Promise<string[]> {
+  return await all<{ value: string }>(
     "SELECT DISTINCT json_each.value AS value FROM contacts, json_each(contacts.tags) WHERE contacts.studio_id = ? AND contacts.merged_into IS NULL ORDER BY value",
     studioId,
   ).map((r) => r.value);

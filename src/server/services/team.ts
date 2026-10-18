@@ -8,7 +8,7 @@ import { audit } from "../audit";
 import { revokeUserSessions } from "../auth";
 import { DEFAULT_SETTINGS, getStudio, saveStudio, mergeSettings, type ModuleKey, type StudioSettings } from "../studio";
 
-function validatePassword(password: string | undefined): string | null {
+async function validatePassword(password: string | undefined): string | null {
   if (!password || password.length < 10) return "סיסמה של 10 תווים לפחות.";
   if (password.length > 200) return "הסיסמה ארוכה מדי.";
   return null;
@@ -16,11 +16,11 @@ function validatePassword(password: string | undefined): string | null {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export function hasAnyStudio(): boolean {
-  return !!one("SELECT 1 FROM studios LIMIT 1");
+export async function hasAnyStudio(): boolean {
+  return !!await one("SELECT 1 FROM studios LIMIT 1");
 }
 
-function slugify(name: string): string {
+async function slugify(name: string): string {
   const base = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -30,8 +30,8 @@ function slugify(name: string): string {
 }
 
 /** First-run setup: creates the first studio and its owner. Disabled once a studio exists. */
-export function setupStudio(input: { studio_name?: string; owner_name?: string; email?: string; password?: string; timezone?: string; modules?: ModuleKey[] }) {
-  if (hasAnyStudio()) throw new AppError("forbidden", "המערכת כבר הוגדרה.");
+export async function setupStudio(input: { studio_name?: string; owner_name?: string; email?: string; password?: string; timezone?: string; modules?: ModuleKey[] }) {
+  if (await hasAnyStudio()) throw new AppError("forbidden", "המערכת כבר הוגדרה.");
   const fields: Record<string, string> = {};
   if (!input.studio_name?.trim()) fields.studio_name = "מה שם הסטודיו?";
   if (!input.owner_name?.trim()) fields.owner_name = "מה השם שלך?";
@@ -39,7 +39,7 @@ export function setupStudio(input: { studio_name?: string; owner_name?: string; 
   const pw = validatePassword(input.password);
   if (pw) fields.password = pw;
   if (Object.keys(fields).length) throw invalid(fields);
-  return createStudioWithOwner({
+  return await createStudioWithOwner({
     studioName: input.studio_name!.trim(),
     ownerName: input.owner_name!.trim(),
     email: input.email!.trim(),
@@ -49,13 +49,13 @@ export function setupStudio(input: { studio_name?: string; owner_name?: string; 
   });
 }
 
-export function createStudioWithOwner(p: { studioName: string; ownerName: string; email: string; password: string; timezone: string; modules: ModuleKey[]; slug?: string }) {
+export async function createStudioWithOwner(p: { studioName: string; ownerName: string; email: string; password: string; timezone: string; modules: ModuleKey[]; slug?: string }) {
   const now = nowIso();
   const studioId = id("std");
-  const existingUser = one<{ id: string }>("SELECT id FROM users WHERE email = ?", p.email);
+  const existingUser = await one<{ id: string }>("SELECT id FROM users WHERE email = ?", p.email);
   const userId = existingUser?.id ?? id("usr");
-  tx(() => {
-    run(
+  await tx(async () => {
+    await run(
       "INSERT INTO studios (id, name, slug, timezone, locale, enabled_modules, settings, status, created_at, updated_at) VALUES (?,?,?,?, 'he', ?,?, 'active', ?,?)",
       studioId,
       p.studioName,
@@ -67,15 +67,15 @@ export function createStudioWithOwner(p: { studioName: string; ownerName: string
       now,
     );
     if (!existingUser) {
-      run("INSERT INTO users (id, email, name, password_hash, created_at, updated_at) VALUES (?,?,?,?,?,?)", userId, p.email, p.ownerName, hashPassword(p.password), now, now);
+      await run("INSERT INTO users (id, email, name, password_hash, created_at, updated_at) VALUES (?,?,?,?,?,?)", userId, p.email, p.ownerName, hashPassword(p.password), now, now);
     }
-    run("INSERT INTO staff_memberships (id, studio_id, user_id, role, scope, active, created_at) VALUES (?,?,?, 'owner', 'all', 1, ?)", id("stm"), studioId, userId, now);
+    await run("INSERT INTO staff_memberships (id, studio_id, user_id, role, scope, active, created_at) VALUES (?,?,?, 'owner', 'all', 1, ?)", id("stm"), studioId, userId, now);
     for (const [provider, name] of [
       ["csv", "ייבוא קבצים (CSV)"],
       ["booking_app", "אפליקציית ההזמנות"],
       ["monday", "Monday"],
     ]) {
-      run(
+      await run(
         "INSERT INTO integration_connections (id, studio_id, provider, name, status, freshness_hours, created_at, updated_at) VALUES (?,?,?,?, 'not_connected', 24, ?,?)",
         id("int"),
         studioId,
@@ -85,20 +85,20 @@ export function createStudioWithOwner(p: { studioName: string; ownerName: string
         now,
       );
     }
-    audit({ studioId, actorId: userId, action: "studio.created", entity: "studio", entityId: studioId });
+    await audit({ studioId, actorId: userId, action: "studio.created", entity: "studio", entityId: studioId });
   });
   return { studioId, userId };
 }
 
-export function listTeam(ctx: Ctx) {
+export async function listTeam(ctx: Ctx) {
   assertCan(ctx, "users");
-  const members = all<{ user_id: string; name: string; email: string; role: Role; scope: string; active: number; created_at: string; last_seen: string | null }>(
+  const members = await all<{ user_id: string; name: string; email: string; role: Role; scope: string; active: number; created_at: string; last_seen: string | null }>(
     `SELECT m.user_id, u.name, u.email, m.role, m.scope, m.active, m.created_at,
             (SELECT MAX(last_seen_at) FROM auth_sessions s WHERE s.user_id = m.user_id AND s.studio_id = m.studio_id) AS last_seen
        FROM staff_memberships m JOIN users u ON u.id = m.user_id WHERE m.studio_id = ? ORDER BY m.active DESC, u.name`,
     ctx.studio.id,
   );
-  const invites = all<{ id: string; email: string; name: string | null; role: Role; expires_at: string; created_at: string }>(
+  const invites = await all<{ id: string; email: string; name: string | null; role: Role; expires_at: string; created_at: string }>(
     "SELECT id, email, name, role, expires_at, created_at FROM invitations WHERE studio_id = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC",
     ctx.studio.id,
     nowIso(),
@@ -106,14 +106,14 @@ export function listTeam(ctx: Ctx) {
   return { members, invites };
 }
 
-export function inviteStaff(ctx: Ctx, input: { email?: string; name?: string; role?: Role; scope?: "all" | "assigned" }) {
+export async function inviteStaff(ctx: Ctx, input: { email?: string; name?: string; role?: Role; scope?: "all" | "assigned" }) {
   assertCan(ctx, "users");
   const fields: Record<string, string> = {};
   if (!input.email || !EMAIL_RE.test(input.email.trim())) fields.email = "כתובת אימייל לא תקינה.";
   if (!input.role || !["owner", "staff", "instructor"].includes(input.role)) fields.role = "בחרו תפקיד.";
   if (Object.keys(fields).length) throw invalid(fields);
   const email = input.email!.trim();
-  const already = one(
+  const already = await one(
     "SELECT 1 FROM staff_memberships m JOIN users u ON u.id = m.user_id WHERE m.studio_id = ? AND u.email = ? AND m.active = 1",
     ctx.studio.id,
     email,
@@ -121,7 +121,7 @@ export function inviteStaff(ctx: Ctx, input: { email?: string; name?: string; ro
   if (already) throw invalid({ email: "המשתמש כבר בצוות." });
   const raw = token(24);
   const now = nowIso();
-  run(
+  await run(
     "INSERT INTO invitations (id, studio_id, email, name, role, scope, token_hash, expires_at, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
     id("inv"),
     ctx.studio.id,
@@ -134,17 +134,17 @@ export function inviteStaff(ctx: Ctx, input: { email?: string; name?: string; ro
     ctx.userId,
     now,
   );
-  audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "user.invited", entity: "invitation", reason: null, diff: { email, role: input.role } });
+  await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "user.invited", entity: "invitation", reason: null, diff: { email, role: input.role } });
   return { token: raw, expires_at: addDays(now, 7) };
 }
 
-export function revokeInvite(ctx: Ctx, inviteId: string) {
+export async function revokeInvite(ctx: Ctx, inviteId: string) {
   assertCan(ctx, "users");
-  run("UPDATE invitations SET revoked_at = ? WHERE id = ? AND studio_id = ?", nowIso(), inviteId, ctx.studio.id);
+  await run("UPDATE invitations SET revoked_at = ? WHERE id = ? AND studio_id = ?", nowIso(), inviteId, ctx.studio.id);
 }
 
-export function inviteInfo(rawToken: string) {
-  return one<{ id: string; email: string; name: string | null; role: Role; studio_name: string; has_user: number }>(
+export async function inviteInfo(rawToken: string) {
+  return await one<{ id: string; email: string; name: string | null; role: Role; studio_name: string; has_user: number }>(
     `SELECT i.id, i.email, i.name, i.role, s.name AS studio_name, EXISTS (SELECT 1 FROM users u WHERE u.email = i.email) AS has_user
        FROM invitations i JOIN studios s ON s.id = i.studio_id
       WHERE i.token_hash = ? AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > ?`,
@@ -153,14 +153,14 @@ export function inviteInfo(rawToken: string) {
   );
 }
 
-export function acceptInvite(rawToken: string, input: { name?: string; password?: string }) {
-  const inv = one<{ id: string; studio_id: string; email: string; role: Role; scope: string }>(
+export async function acceptInvite(rawToken: string, input: { name?: string; password?: string }) {
+  const inv = await one<{ id: string; studio_id: string; email: string; role: Role; scope: string }>(
     "SELECT id, studio_id, email, role, scope FROM invitations WHERE token_hash = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?",
     sha256(rawToken),
     nowIso(),
   );
   if (!inv) throw new AppError("blocked", "ההזמנה כבר שומשה או שפג תוקפה. בקשו הזמנה חדשה.");
-  const existing = one<{ id: string; password_hash: string }>("SELECT id, password_hash FROM users WHERE email = ?", inv.email);
+  const existing = await one<{ id: string; password_hash: string }>("SELECT id, password_hash FROM users WHERE email = ?", inv.email);
   const now = nowIso();
   let userId: string;
   if (existing) {
@@ -174,9 +174,9 @@ export function acceptInvite(rawToken: string, input: { name?: string; password?
     if (Object.keys(fields).length) throw invalid(fields);
     userId = id("usr");
   }
-  tx(() => {
-    if (!existing) run("INSERT INTO users (id, email, name, password_hash, created_at, updated_at) VALUES (?,?,?,?,?,?)", userId, inv.email, input.name!.trim(), hashPassword(input.password!), now, now);
-    run(
+  await tx(async () => {
+    if (!existing) await run("INSERT INTO users (id, email, name, password_hash, created_at, updated_at) VALUES (?,?,?,?,?,?)", userId, inv.email, input.name!.trim(), hashPassword(input.password!), now, now);
+    await run(
       `INSERT INTO staff_memberships (id, studio_id, user_id, role, scope, active, created_at) VALUES (?,?,?,?,?,1,?)
        ON CONFLICT(studio_id, user_id) DO UPDATE SET role = excluded.role, scope = excluded.scope, active = 1`,
       id("stm"),
@@ -186,22 +186,22 @@ export function acceptInvite(rawToken: string, input: { name?: string; password?
       inv.scope,
       now,
     );
-    run("UPDATE invitations SET accepted_at = ? WHERE id = ?", now, inv.id);
-    audit({ studioId: inv.studio_id, actorId: userId, action: "user.joined", entity: "user", entityId: userId, diff: { role: inv.role } });
+    await run("UPDATE invitations SET accepted_at = ? WHERE id = ?", now, inv.id);
+    await audit({ studioId: inv.studio_id, actorId: userId, action: "user.joined", entity: "user", entityId: userId, diff: { role: inv.role } });
   });
   return { userId, studioId: inv.studio_id };
 }
 
-export function updateMember(ctx: Ctx, userId: string, input: { role?: Role; scope?: "all" | "assigned"; active?: boolean }) {
+export async function updateMember(ctx: Ctx, userId: string, input: { role?: Role; scope?: "all" | "assigned"; active?: boolean }) {
   assertCan(ctx, "users");
-  const m = one<{ role: Role; active: number }>("SELECT role, active FROM staff_memberships WHERE studio_id = ? AND user_id = ?", ctx.studio.id, userId);
+  const m = await one<{ role: Role; active: number }>("SELECT role, active FROM staff_memberships WHERE studio_id = ? AND user_id = ?", ctx.studio.id, userId);
   if (!m) throw notFound("המשתמש");
-  const owners = one<{ n: number }>("SELECT COUNT(*) AS n FROM staff_memberships WHERE studio_id = ? AND role = 'owner' AND active = 1", ctx.studio.id)!.n;
+  const owners = await one<{ n: number }>("SELECT COUNT(*) AS n FROM staff_memberships WHERE studio_id = ? AND role = 'owner' AND active = 1", ctx.studio.id)!.n;
   const losingOwner = m.role === "owner" && m.active === 1 && ((input.role && input.role !== "owner") || input.active === false);
   if (losingOwner && owners <= 1) throw new AppError("blocked", "חייב להישאר לפחות בעלים פעיל אחד.");
   if (input.role && !["owner", "staff", "instructor"].includes(input.role)) throw invalid({ role: "תפקיד לא מוכר." });
-  tx(() => {
-    run(
+  await tx(async () => {
+    await run(
       "UPDATE staff_memberships SET role = COALESCE(?, role), scope = COALESCE(?, scope), active = COALESCE(?, active) WHERE studio_id = ? AND user_id = ?",
       input.role ?? null,
       input.scope ?? null,
@@ -209,51 +209,51 @@ export function updateMember(ctx: Ctx, userId: string, input: { role?: Role; sco
       ctx.studio.id,
       userId,
     );
-    if (input.active === false) revokeUserSessions(userId, ctx.studio.id);
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "user.permissions_changed", entity: "user", entityId: userId, diff: input });
+    if (input.active === false) await revokeUserSessions(userId, ctx.studio.id);
+    await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "user.permissions_changed", entity: "user", entityId: userId, diff: input });
   });
 }
 
 /** Owner-issued one-time reset link (no email provider is configured). */
-export function createResetLink(ctx: Ctx, userId: string) {
+export async function createResetLink(ctx: Ctx, userId: string) {
   assertCan(ctx, "users");
-  if (!one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ?", ctx.studio.id, userId)) throw notFound("המשתמש");
+  if (!await one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ?", ctx.studio.id, userId)) throw notFound("המשתמש");
   const raw = token(24);
   const now = nowIso();
-  run("INSERT INTO password_resets (id, user_id, token_hash, expires_at, created_by, created_at) VALUES (?,?,?,?,?,?)", id("pwr"), userId, sha256(raw), addHours(now, 24), ctx.userId, now);
-  audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "user.reset_link_created", entity: "user", entityId: userId });
+  await run("INSERT INTO password_resets (id, user_id, token_hash, expires_at, created_by, created_at) VALUES (?,?,?,?,?,?)", id("pwr"), userId, sha256(raw), addHours(now, 24), ctx.userId, now);
+  await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "user.reset_link_created", entity: "user", entityId: userId });
   return { token: raw, expires_at: addHours(now, 24) };
 }
 
-export function resetPassword(rawToken: string, password: string) {
-  const r = one<{ id: string; user_id: string }>("SELECT id, user_id FROM password_resets WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?", sha256(rawToken), nowIso());
+export async function resetPassword(rawToken: string, password: string) {
+  const r = await one<{ id: string; user_id: string }>("SELECT id, user_id FROM password_resets WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?", sha256(rawToken), nowIso());
   if (!r) throw new AppError("blocked", "הקישור כבר שומש או שפג תוקפו.");
   const pw = validatePassword(password);
   if (pw) throw invalid({ password: pw });
   const now = nowIso();
-  tx(() => {
-    run("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", hashPassword(password), now, r.user_id);
-    run("UPDATE password_resets SET used_at = ? WHERE id = ?", now, r.id);
-    run("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", now, r.user_id);
+  await tx(async () => {
+    await run("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", hashPassword(password), now, r.user_id);
+    await run("UPDATE password_resets SET used_at = ? WHERE id = ?", now, r.id);
+    await run("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", now, r.user_id);
   });
   return { userId: r.user_id };
 }
 
-export function changePassword(ctx: Ctx, current: string, next: string) {
-  const u = one<{ password_hash: string }>("SELECT password_hash FROM users WHERE id = ?", ctx.userId)!;
+export async function changePassword(ctx: Ctx, current: string, next: string) {
+  const u = await one<{ password_hash: string }>("SELECT password_hash FROM users WHERE id = ?", ctx.userId)!;
   if (!verifyPassword(current ?? "", u.password_hash)) throw invalid({ current: "הסיסמה הנוכחית אינה נכונה." });
   const pw = validatePassword(next);
   if (pw) throw invalid({ next: pw });
-  run("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", hashPassword(next), nowIso(), ctx.userId);
-  run("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND id <> ? AND revoked_at IS NULL", nowIso(), ctx.userId, ctx.sessionId);
+  await run("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", hashPassword(next), nowIso(), ctx.userId);
+  await run("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND id <> ? AND revoked_at IS NULL", nowIso(), ctx.userId, ctx.sessionId);
 }
 
-export function updateStudioSettings(
+export async function updateStudioSettings(
   ctx: Ctx,
   input: { name?: string; timezone?: string; modules?: ModuleKey[]; settings?: Partial<StudioSettings> },
 ) {
   assertCan(ctx, "settings");
-  const studio = getStudio(ctx.studio.id)!;
+  const studio = await getStudio(ctx.studio.id)!;
   const fields: Record<string, string> = {};
   const name = input.name !== undefined ? input.name.trim() : studio.name;
   if (!name) fields.name = "צריך שם לסטודיו.";
@@ -285,7 +285,7 @@ export function updateStudioSettings(
     settings.noticeVersion = `v${n + 1}`;
   }
   if (Object.keys(fields).length) throw invalid(fields);
-  saveStudio({ id: studio.id, name, timezone: tz, locale: studio.locale, modules, settings });
-  audit({ studioId: studio.id, actorId: ctx.userId, action: "settings.updated", entity: "studio", entityId: studio.id, diff: { modules, rules: settings.rules } });
-  return getStudio(studio.id)!;
+  await saveStudio({ id: studio.id, name, timezone: tz, locale: studio.locale, modules, settings });
+  await audit({ studioId: studio.id, actorId: ctx.userId, action: "settings.updated", entity: "studio", entityId: studio.id, diff: { modules, rules: settings.rules } });
+  return await getStudio(studio.id)!;
 }

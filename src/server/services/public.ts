@@ -26,7 +26,7 @@ export type RegistrationInput = {
  * Accepts a registration request. Always answers with the same generic receipt,
  * never revealing whether the phone already belongs to a customer (AC-Q01).
  */
-export function submitRegistration(studio: Studio, input: RegistrationInput): { status: "received" } {
+export async function submitRegistration(studio: Studio, input: RegistrationInput): { status: "received" } {
   if (!studio.modules.includes("qr")) throw notFound("הדף");
   const fields: Record<string, string> = {};
   const name = (input.name ?? "").trim().replace(/\s+/g, " ");
@@ -39,10 +39,10 @@ export function submitRegistration(studio: Studio, input: RegistrationInput): { 
   if (Object.keys(fields).length) throw invalid(fields);
   if (input.website) return { status: "received" }; // bot
 
-  const existingRequest = one("SELECT 1 FROM registrations WHERE studio_id = ? AND request_id = ?", studio.id, requestId);
+  const existingRequest = await one("SELECT 1 FROM registrations WHERE studio_id = ? AND request_id = ?", studio.id, requestId);
   if (existingRequest) return { status: "received" };
   // Duplicate submission window: same phone within 10 minutes is treated as one request.
-  const recent = one(
+  const recent = await one(
     "SELECT 1 FROM registrations WHERE studio_id = ? AND phone_e164 = ? AND created_at > ?",
     studio.id,
     phone.e164,
@@ -56,8 +56,8 @@ export function submitRegistration(studio: Studio, input: RegistrationInput): { 
   const allowed = input.contact_allowed === true;
   const now = nowIso();
 
-  tx(() => {
-    const match = one<{ id: string; owner_id: string | null }>(
+  await tx(async () => {
+    const match = await one<{ id: string; owner_id: string | null }>(
       "SELECT id, owner_id FROM contacts WHERE studio_id = ? AND phone_e164 = ? AND merged_into IS NULL ORDER BY created_at LIMIT 1",
       studio.id,
       phone.e164,
@@ -66,7 +66,7 @@ export function submitRegistration(studio: Studio, input: RegistrationInput): { 
     if (match) {
       // Existing number: record the request and a review task; never overwrite verified data.
       contactId = match.id;
-      run(
+      await run(
         `INSERT INTO tasks (id, studio_id, contact_id, assignee_id, reason_code, title, status, due_at, created_at, updated_at)
          VALUES (?,?,?,?, 'REG', ?, 'open', ?,?,?)`,
         id("tsk"),
@@ -80,7 +80,7 @@ export function submitRegistration(studio: Studio, input: RegistrationInput): { 
       );
     } else {
       contactId = id("con");
-      run(
+      await run(
         `INSERT INTO contacts (id, studio_id, display_name, phone_e164, phone_raw, phone_valid, preferred_language, pipeline_stage, source, interest, tags, created_at, updated_at)
          VALUES (?,?,?,?,?,1,?, 'new_lead', 'qr', ?, '[]', ?,?)`,
         contactId,
@@ -93,7 +93,7 @@ export function submitRegistration(studio: Studio, input: RegistrationInput): { 
         now,
         now,
       );
-      run(
+      await run(
         "INSERT INTO stage_changes (id, studio_id, contact_id, from_stage, to_stage, reason, created_at) VALUES (?,?,?,?,?,?,?)",
         id("stg"),
         studio.id,
@@ -103,12 +103,12 @@ export function submitRegistration(studio: Studio, input: RegistrationInput): { 
         "הרשמה ב-QR",
         now,
       );
-      setPreferenceRaw(studio.id, contactId, allowed, allowed ? null : "לא אישר/ה קבלת הודעות בהרשמה", "qr_registration", null, studio.settings.noticeVersion);
+      await setPreferenceRaw(studio.id, contactId, allowed, allowed ? null : "לא אישר/ה קבלת הודעות בהרשמה", "qr_registration", null, studio.settings.noticeVersion);
       if (note) {
-        run("INSERT INTO notes (id, studio_id, contact_id, body, is_private, created_at) VALUES (?,?,?,?,0,?)", id("not"), studio.id, contactId, `מטופס ההרשמה: ${note}`, now);
+        await run("INSERT INTO notes (id, studio_id, contact_id, body, is_private, created_at) VALUES (?,?,?,?,0,?)", id("not"), studio.id, contactId, `מטופס ההרשמה: ${note}`, now);
       }
     }
-    run(
+    await run(
       `INSERT INTO registrations (id, studio_id, request_id, name, phone_raw, phone_e164, language, interest, note, contact_allowed, notice_version, contact_id, matched_existing, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       id("reg"),
@@ -126,7 +126,7 @@ export function submitRegistration(studio: Studio, input: RegistrationInput): { 
       match ? 1 : 0,
       now,
     );
-    run(
+    await run(
       "INSERT INTO interaction_events (id, studio_id, contact_id, channel, event_type, evidence_type, note, occurred_at) VALUES (?,?,?,?,?,?,?,?)",
       id("evt"),
       studio.id,
@@ -138,13 +138,13 @@ export function submitRegistration(studio: Studio, input: RegistrationInput): { 
       now,
     );
   });
-  markEvaluationStale(studio.id);
+  await markEvaluationStale(studio.id);
   return { status: "received" };
 }
 
-export function listRegistrations(ctx: Ctx, status: "new" | "all") {
+export async function listRegistrations(ctx: Ctx, status: "new" | "all") {
   assertCan(ctx, "registrations.review");
-  return all<{
+  return await all<{
     id: string;
     name: string;
     phone_e164: string | null;
@@ -164,21 +164,21 @@ export function listRegistrations(ctx: Ctx, status: "new" | "all") {
   );
 }
 
-export function newRegistrationsCount(studioId: string): number {
-  return one<{ n: number }>("SELECT COUNT(*) AS n FROM registrations WHERE studio_id = ? AND status = 'new'", studioId)!.n;
+export async function newRegistrationsCount(studioId: string): number {
+  return await one<{ n: number }>("SELECT COUNT(*) AS n FROM registrations WHERE studio_id = ? AND status = 'new'", studioId)!.n;
 }
 
-export function reviewRegistration(ctx: Ctx, registrationId: string, decision: "reviewed" | "rejected" | null, ownerId?: string | null) {
+export async function reviewRegistration(ctx: Ctx, registrationId: string, decision: "reviewed" | "rejected" | null, ownerId?: string | null) {
   assertCan(ctx, "registrations.review");
-  const r = one<{ id: string; contact_id: string | null; status: string }>("SELECT id, contact_id, status FROM registrations WHERE id = ? AND studio_id = ?", registrationId, ctx.studio.id);
+  const r = await one<{ id: string; contact_id: string | null; status: string }>("SELECT id, contact_id, status FROM registrations WHERE id = ? AND studio_id = ?", registrationId, ctx.studio.id);
   if (!r) throw notFound("הבקשה");
-  tx(() => {
-    if (decision) run("UPDATE registrations SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?", decision, ctx.userId, nowIso(), registrationId);
+  await tx(async () => {
+    if (decision) await run("UPDATE registrations SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?", decision, ctx.userId, nowIso(), registrationId);
     if (ownerId !== undefined && r.contact_id) {
-      if (ownerId && !one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1", ctx.studio.id, ownerId)) {
+      if (ownerId && !await one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1", ctx.studio.id, ownerId)) {
         throw invalid({ owner_id: "האחראי לא בצוות." });
       }
-      run("UPDATE contacts SET owner_id = ?, version = version + 1, updated_at = ? WHERE id = ? AND studio_id = ?", ownerId || null, nowIso(), r.contact_id, ctx.studio.id);
+      await run("UPDATE contacts SET owner_id = ?, version = version + 1, updated_at = ? WHERE id = ? AND studio_id = ?", ownerId || null, nowIso(), r.contact_id, ctx.studio.id);
     }
   });
 }
@@ -190,20 +190,20 @@ export const MEMBER_COOKIE = "sm_member";
 const ACTIVATION_HOURS = 24;
 const MEMBER_SESSION_DAYS = 180;
 
-export function createActivation(ctx: Ctx, contactId: string) {
+export async function createActivation(ctx: Ctx, contactId: string) {
   assertCan(ctx, "attendance.record");
   if (ctx.role === "instructor") {
     // Instructors can link a device in person but do not see CRM data.
-    const exists = one("SELECT 1 FROM contacts WHERE id = ? AND studio_id = ? AND merged_into IS NULL", contactId, ctx.studio.id);
+    const exists = await one("SELECT 1 FROM contacts WHERE id = ? AND studio_id = ? AND merged_into IS NULL", contactId, ctx.studio.id);
     if (!exists) throw notFound("הלקוח");
   } else {
-    getContact(ctx, contactId);
+    await getContact(ctx, contactId);
   }
   const raw = token(24);
   const now = nowIso();
-  tx(() => {
-    run("UPDATE member_activations SET revoked_at = ? WHERE contact_id = ? AND studio_id = ? AND used_at IS NULL AND revoked_at IS NULL", now, contactId, ctx.studio.id);
-    run(
+  await tx(async () => {
+    await run("UPDATE member_activations SET revoked_at = ? WHERE contact_id = ? AND studio_id = ? AND used_at IS NULL AND revoked_at IS NULL", now, contactId, ctx.studio.id);
+    await run(
       "INSERT INTO member_activations (id, studio_id, contact_id, token_hash, expires_at, created_by, created_at) VALUES (?,?,?,?,?,?,?)",
       id("act"),
       ctx.studio.id,
@@ -213,27 +213,27 @@ export function createActivation(ctx: Ctx, contactId: string) {
       ctx.userId,
       now,
     );
-    audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "member.activation_created", entity: "contact", entityId: contactId });
+    await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "member.activation_created", entity: "contact", entityId: contactId });
   });
   return { token: raw, expires_at: addHours(now, ACTIVATION_HOURS) };
 }
 
-export function activationInfo(rawToken: string) {
-  const a = one<{ studio_id: string; contact_id: string; expires_at: string; used_at: string | null; revoked_at: string | null }>(
+export async function activationInfo(rawToken: string) {
+  const a = await one<{ studio_id: string; contact_id: string; expires_at: string; used_at: string | null; revoked_at: string | null }>(
     "SELECT studio_id, contact_id, expires_at, used_at, revoked_at FROM member_activations WHERE token_hash = ?",
     sha256(rawToken),
   );
   if (!a || a.revoked_at || a.used_at || a.expires_at < nowIso()) return null;
-  const studio = one<{ name: string }>("SELECT name FROM studios WHERE id = ?", a.studio_id);
-  const contact = one<{ display_name: string }>("SELECT display_name FROM contacts WHERE id = ?", a.contact_id);
+  const studio = await one<{ name: string }>("SELECT name FROM studios WHERE id = ?", a.studio_id);
+  const contact = await one<{ display_name: string }>("SELECT display_name FROM contacts WHERE id = ?", a.contact_id);
   return { studioName: studio?.name ?? "", firstName: (contact?.display_name ?? "").split(/\s+/)[0] };
 }
 
 /** Redeems a one-time activation link and returns a raw member-session token. */
-export function redeemActivation(rawToken: string): { sessionToken: string; expires: string; studioId: string } {
+export async function redeemActivation(rawToken: string): { sessionToken: string; expires: string; studioId: string } {
   if (!rawToken || rawToken.length > 100) throw new AppError("validation", "הקישור אינו תקין.");
-  return tx(() => {
-    const a = one<{ id: string; studio_id: string; contact_id: string; expires_at: string; used_at: string | null; revoked_at: string | null }>(
+  return await tx(async () => {
+    const a = await one<{ id: string; studio_id: string; contact_id: string; expires_at: string; used_at: string | null; revoked_at: string | null }>(
       "SELECT id, studio_id, contact_id, expires_at, used_at, revoked_at FROM member_activations WHERE token_hash = ?",
       sha256(rawToken),
     );
@@ -241,10 +241,10 @@ export function redeemActivation(rawToken: string): { sessionToken: string; expi
       throw new AppError("blocked", "הקישור כבר שומש או שפג תוקפו. בקשו קישור חדש בקבלה.");
     }
     const now = nowIso();
-    run("UPDATE member_activations SET used_at = ? WHERE id = ?", now, a.id);
+    await run("UPDATE member_activations SET used_at = ? WHERE id = ?", now, a.id);
     const raw = token(32);
     const expires = addDays(now, MEMBER_SESSION_DAYS);
-    run(
+    await run(
       "INSERT INTO member_sessions (id, studio_id, contact_id, token_hash, expires_at, created_at) VALUES (?,?,?,?,?,?)",
       id("msn"),
       a.studio_id,
@@ -258,9 +258,9 @@ export function redeemActivation(rawToken: string): { sessionToken: string; expi
 }
 
 /** Resolves the member session cookie for a given studio. Member sessions grant attendance only. */
-export function memberFromToken(rawToken: string | undefined, studioId: string) {
+export async function memberFromToken(rawToken: string | undefined, studioId: string) {
   if (!rawToken) return null;
-  const s = one<{ id: string; contact_id: string; display_name: string }>(
+  const s = await one<{ id: string; contact_id: string; display_name: string }>(
     `SELECT ms.id, ms.contact_id, c.display_name FROM member_sessions ms JOIN contacts c ON c.id = ms.contact_id
       WHERE ms.token_hash = ? AND ms.studio_id = ? AND ms.revoked_at IS NULL AND ms.expires_at > ? AND c.merged_into IS NULL`,
     sha256(rawToken),
@@ -268,13 +268,13 @@ export function memberFromToken(rawToken: string | undefined, studioId: string) 
     nowIso(),
   );
   if (!s) return null;
-  run("UPDATE member_sessions SET last_used_at = ? WHERE id = ?", nowIso(), s.id);
+  await run("UPDATE member_sessions SET last_used_at = ? WHERE id = ?", nowIso(), s.id);
   return { contactId: s.contact_id, firstName: s.display_name.split(/\s+/)[0] };
 }
 
-export function memberDevices(ctx: Ctx, contactId: string) {
-  getContact(ctx, contactId);
-  return all<{ id: string; created_at: string; last_used_at: string | null; expires_at: string }>(
+export async function memberDevices(ctx: Ctx, contactId: string) {
+  await getContact(ctx, contactId);
+  return await all<{ id: string; created_at: string; last_used_at: string | null; expires_at: string }>(
     "SELECT id, created_at, last_used_at, expires_at FROM member_sessions WHERE contact_id = ? AND studio_id = ? AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC",
     contactId,
     ctx.studio.id,
@@ -282,8 +282,8 @@ export function memberDevices(ctx: Ctx, contactId: string) {
   );
 }
 
-export function revokeMemberDevices(ctx: Ctx, contactId: string) {
-  getContact(ctx, contactId);
-  run("UPDATE member_sessions SET revoked_at = ? WHERE contact_id = ? AND studio_id = ? AND revoked_at IS NULL", nowIso(), contactId, ctx.studio.id);
-  audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "member.sessions_revoked", entity: "contact", entityId: contactId });
+export async function revokeMemberDevices(ctx: Ctx, contactId: string) {
+  await getContact(ctx, contactId);
+  await run("UPDATE member_sessions SET revoked_at = ? WHERE contact_id = ? AND studio_id = ? AND revoked_at IS NULL", nowIso(), contactId, ctx.studio.id);
+  await audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "member.sessions_revoked", entity: "contact", entityId: contactId });
 }
