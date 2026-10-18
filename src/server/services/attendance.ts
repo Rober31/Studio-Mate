@@ -177,13 +177,15 @@ export type RosterRow = {
   actor_name: string | null;
   reversal_reason: string | null;
   version: number;
+  deducted: number;
 };
 
 export function roster(ctx: Ctx, sessionId: string): RosterRow[] {
   getSession(ctx, sessionId);
   return all<RosterRow>(
     `SELECT a.id, a.contact_id, c.display_name AS contact_name, a.membership_id, p.name AS plan_name, a.status, a.channel, a.checked_in_at,
-            u.name AS actor_name, a.reversal_reason, a.version
+            u.name AS actor_name, a.reversal_reason, a.version,
+            EXISTS (SELECT 1 FROM balance_entries d WHERE d.attendance_id = a.id AND d.kind = 'deduction' AND NOT EXISTS (SELECT 1 FROM balance_entries r WHERE r.reverses_id = d.id)) AS deducted
        FROM attendance a JOIN contacts c ON c.id = a.contact_id
        LEFT JOIN memberships m ON m.id = a.membership_id LEFT JOIN plans p ON p.id = m.plan_id
        LEFT JOIN users u ON u.id = a.actor_id
@@ -476,4 +478,52 @@ export function exportAttendanceCsv(ctx: Ctx, fromIso: string, toIso: string, se
   );
   audit({ studioId: ctx.studio.id, actorId: ctx.userId, action: "attendance.exported", entity: "attendance", diff: { from: fromIso, to: toIso, rows: rows.length } });
   return rows;
+}
+
+/**
+ * Minimal contact lookup for recording attendance (also used by instructors,
+ * who have no CRM access): only names and eligible memberships are returned.
+ */
+export function sessionCandidates(ctx: Ctx, sessionId: string, q: string) {
+  assertCan(ctx, "attendance.record");
+  getSession(ctx, sessionId);
+  const term = q.trim();
+  if (term.length < 2) return [];
+  const digits = term.replace(/\D/g, "");
+  const rows = digits.length >= 3
+    ? all<{ id: string; display_name: string }>(
+        "SELECT id, display_name FROM contacts WHERE studio_id = ? AND merged_into IS NULL AND archived = 0 AND (phone_e164 LIKE ? OR phone_raw LIKE ?) ORDER BY display_name LIMIT 12",
+        ctx.studio.id,
+        `%${digits.replace(/^0/, "")}%`,
+        `%${digits}%`,
+      )
+    : all<{ id: string; display_name: string }>(
+        "SELECT id, display_name FROM contacts WHERE studio_id = ? AND merged_into IS NULL AND archived = 0 AND display_name LIKE ? ORDER BY display_name LIMIT 12",
+        ctx.studio.id,
+        `%${term}%`,
+      );
+  return rows.map((r) => {
+    const attended = one<{ status: string }>("SELECT status FROM attendance WHERE studio_id = ? AND contact_id = ? AND session_id = ?", ctx.studio.id, r.id, sessionId);
+    return {
+      id: r.id,
+      display_name: r.display_name,
+      attendance_status: attended?.status ?? null,
+      memberships: eligibleMemberships(ctx.studio.id, r.id).map((m) => ({
+        id: m.id,
+        plan_name: m.plan_name,
+        plan_type: m.plan_type,
+        balance: m.balance,
+        authority: m.authority,
+        ends_at: m.ends_at,
+      })),
+    };
+  });
+}
+
+export function sessionDeducted(studioId: string, attendanceId: string): boolean {
+  return !!one(
+    "SELECT 1 FROM balance_entries d WHERE d.attendance_id = ? AND d.studio_id = ? AND d.kind = 'deduction' AND NOT EXISTS (SELECT 1 FROM balance_entries r WHERE r.reverses_id = d.id)",
+    attendanceId,
+    studioId,
+  );
 }

@@ -168,12 +168,12 @@ export function newRegistrationsCount(studioId: string): number {
   return one<{ n: number }>("SELECT COUNT(*) AS n FROM registrations WHERE studio_id = ? AND status = 'new'", studioId)!.n;
 }
 
-export function reviewRegistration(ctx: Ctx, registrationId: string, decision: "reviewed" | "rejected", ownerId?: string | null) {
+export function reviewRegistration(ctx: Ctx, registrationId: string, decision: "reviewed" | "rejected" | null, ownerId?: string | null) {
   assertCan(ctx, "registrations.review");
   const r = one<{ id: string; contact_id: string | null; status: string }>("SELECT id, contact_id, status FROM registrations WHERE id = ? AND studio_id = ?", registrationId, ctx.studio.id);
   if (!r) throw notFound("הבקשה");
   tx(() => {
-    run("UPDATE registrations SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?", decision, ctx.userId, nowIso(), registrationId);
+    if (decision) run("UPDATE registrations SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?", decision, ctx.userId, nowIso(), registrationId);
     if (ownerId !== undefined && r.contact_id) {
       if (ownerId && !one("SELECT 1 FROM staff_memberships WHERE studio_id = ? AND user_id = ? AND active = 1", ctx.studio.id, ownerId)) {
         throw invalid({ owner_id: "האחראי לא בצוות." });

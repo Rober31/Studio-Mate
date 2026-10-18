@@ -1,0 +1,21 @@
+/* Contacts area (S03/S04) */
+.contacts-filters .chip select {
+  max-width: 8.5em;
+  text-overflow: ellipsis;
+}
+.contact-kv {
+  grid-template-columns: 120px 1fr;
+}
+@media (min-width: 720px) {
+  .contact-kv {
+    grid-template-columns: 160px 1fr;
+  }
+}
+.contact-actions .btn {
+  flex: 0 0 auto;
+}
+@media (max-width: 480px) {
+  .contact-actions .btn:not(.ghost) {
+    flex: 1 1 auto;
+  }
+}

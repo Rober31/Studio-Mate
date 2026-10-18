@@ -86,7 +86,7 @@ const HEADER_GUESS: Record<ImportField, RegExp> = {
   language: /(language|שפה)/i,
   external_id: /^(id|external ?id|item id|מזהה)$/i,
   plan_name: /(plan|membership|מנוי|מסלול)/i,
-  membership_start: /(start|תחילה|התחלה)/i,
+  membership_start: /(start|תחיל|התחל)/i,
   membership_end: /(end|expir|סיום|תוקף)/i,
   balance: /(balance|remaining|יתרה|שיעורים)/i,
 };
