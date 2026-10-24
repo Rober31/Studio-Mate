@@ -8,6 +8,8 @@ import { RULE_ACTION, RULE_ICON, RULE_LABEL, RULE_SHORT, STAGE_LABEL, STAGE_TONE
 import { localInputValue, relTime, tomorrowAt } from "@/lib/format";
 import { Icon } from "../Icon";
 import { CountUp } from "../CountUp";
+import { CategoryCards, DashGreeting, HighlightCard, ProgressTile, QuickActions, RegistrationsInbox, TasksWidget, WeekSchedule } from "../dashboard/DashboardWidgets";
+import type { DashboardData } from "@/server/services/dashboard";
 import { Avatar, Badge, Banner, Button, EmptyState, IconButton, Menu, Sheet, TextArea, TextField, useToast, cx } from "../ui";
 import { Composer, type ComposerTarget } from "./Composer";
 import { OutcomeForm, type OutcomeTarget } from "./OutcomeForm";
@@ -56,6 +58,8 @@ export function TodayView({
   initial,
   staff,
   me,
+  tz,
+  dash,
   canFollowup,
   canSettings,
 }: {
@@ -63,6 +67,7 @@ export function TodayView({
   staff: { id: string; name: string }[];
   me: { id: string; name: string };
   tz: string;
+  dash: DashboardData;
   canFollowup: boolean;
   canSettings: boolean;
 }) {
@@ -123,31 +128,23 @@ export function TodayView({
     if (owner === "me") list = list.filter((c) => c.ownerId === me.id || c.reasons.some((r) => r.assignee === me.name));
     else if (owner === "none") list = list.filter((c) => !c.ownerId);
     else if (owner) list = list.filter((c) => c.ownerId === owner);
-    if (rule) list = list.filter((c) => c.reasons.some((r) => r.rule === rule));
+    if (rule) list = list.filter((c) => c.reasons.some((r) => rule.split("|").includes(r.rule)));
     return list;
   }, [data.cards, view, owner, rule, me]);
 
   const rulesPresent = Array.from(new Set(data.cards.flatMap((c) => c.reasons.map((r) => r.rule))));
-  const greeting = (() => {
-    const h = new Date().getHours();
-    return h < 12 ? "בוקר טוב" : h < 17 ? "צהריים טובים" : "ערב טוב";
-  })();
 
   return (
     <div className="page">
-      <div className="page-head">
+      <div className="dash-top">
         <div>
-          <h1 className="page-title">
-            {greeting}, {me.name.split(" ")[0]}
-          </h1>
-          <p className="page-sub">
-            {data.counts.needFollowup ? `${data.counts.needFollowup} אנשים מחכים למעקב היום` : "אין מעקבים פתוחים להיום"}
-          </p>
+          <DashGreeting firstName={me.name.split(" ")[0]} need={data.counts.needFollowup} done={dash.doneToday} />
+          <div className="dash-tools">
+            <IconButton icon="refresh" label="רענון" onClick={refresh} disabled={refreshing} className={refreshing ? "spin" : undefined} size="sm" />
+            <span className="xsmall subtle">עודכן {relTime(data.evaluatedAt)}</span>
+          </div>
         </div>
-        <div className="row">
-          <span className="xsmall subtle hide-mobile">עודכן {relTime(data.evaluatedAt)}</span>
-          <IconButton icon="refresh" label="רענון" onClick={refresh} disabled={refreshing} className={refreshing ? "spin" : undefined} />
-        </div>
+        <QuickActions data={dash} canEdit={canFollowup || canSettings} />
       </div>
 
       {data.freshness.stale && (
@@ -159,7 +156,7 @@ export function TodayView({
         </div>
       )}
 
-      <div className="stats-3" style={{ marginBottom: 20 }}>
+      <div className="dash-kpis kpis">
         <button className="stat hero" aria-pressed={view === "all"} onClick={() => setView("all")}>
           <div className="stat-top">
             <span className="icon-chip">
@@ -193,8 +190,17 @@ export function TodayView({
           </div>
           <div className="stat-label">מנויים מסתיימים</div>
         </button>
+        <ProgressTile done={dash.doneToday} remaining={data.counts.needFollowup} />
       </div>
 
+      <CategoryCards cards={data.cards} active={rule} onPick={(r) => { setRule(r); setView("all"); }} />
+
+      <div className="dash-grid">
+        <div className="dash-main">
+          <div className="dash-main-head">
+            <h2 className="dash-main-title">מעקבים להיום</h2>
+            <span className="small subtle num">{cards.length} מתוך {data.cards.length}</span>
+          </div>
       <div className="chips" style={{ marginBottom: 16 }} role="group" aria-label="סינון">
         <button className="chip" aria-pressed={owner === ""} onClick={() => setOwner("")}>
           כולם
@@ -427,6 +433,15 @@ export function TodayView({
           </div>
         </details>
       )}
+
+        </div>
+        <aside className="dash-side" aria-label="סקירה">
+          {dash.week && <WeekSchedule week={dash.week} tz={tz} />}
+          <TasksWidget tasks={dash.tasks} />
+          {dash.registrations && <RegistrationsInbox regs={dash.registrations} />}
+          <HighlightCard data={dash} />
+        </aside>
+      </div>
 
       <Composer target={composer} open={!!composer} onClose={() => setComposer(null)} onDone={() => composer && removeCard(composer.contactId)} />
 

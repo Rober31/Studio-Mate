@@ -45,6 +45,10 @@ export function RegistrationsView({
   const toast = useToast();
   const [filter, setFilter] = useState<"new" | "all">("new");
   const [poster, setPoster] = useState(false);
+  // Deep link from the dashboard: /registrations?poster=1 opens the poster sheet.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("poster") === "1") setPoster(true);
+  }, []);
   const [busy, setBusy] = useState<string | null>(null);
   const newCount = items.filter((i) => i.status === "new").length;
   const list = useMemo(() => (filter === "new" ? items.filter((i) => i.status === "new") : items), [items, filter]);
