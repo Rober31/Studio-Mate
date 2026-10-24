@@ -119,3 +119,19 @@ export function ThemeMenuButton() {
     </Menu>
   );
 }
+
+/** Compact pill of round icon buttons with a sliding active circle (desktop top bar). */
+export function ThemePill() {
+  const { choice, set } = useTheme();
+  const index = Math.max(0, OPTIONS.findIndex((o) => o.value === choice));
+  return (
+    <div className="theme-pill" role="radiogroup" aria-label="מראה" style={{ ["--i" as string]: index }}>
+      <span className="theme-pill-thumb" aria-hidden />
+      {OPTIONS.map((o) => (
+        <button key={o.value} type="button" role="radio" aria-checked={choice === o.value} aria-label={o.label} title={o.label} onClick={() => set(o.value)}>
+          <Icon name={o.icon} size={16} />
+        </button>
+      ))}
+    </div>
+  );
+}

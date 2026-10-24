@@ -3,9 +3,10 @@ import "@/app/admin.css";
 
 import { useState } from "react";
 import { api } from "@/lib/api";
-import { pct, fmtYmd } from "@/lib/format";
+import { fmtYmd } from "@/lib/format";
 import { OUTCOME_LABEL, STAGE_LABEL, STAGE_ORDER } from "@/lib/i18n";
 import { Icon } from "../Icon";
+import { CountUp } from "../CountUp";
 import { Banner, EmptyState, Segmented, useToast } from "../ui";
 
 type Summary = {
@@ -22,11 +23,32 @@ type Summary = {
   stageCounts: { stage: string; n: number }[];
 };
 
-function Kpi({ value, label, note, tone }: { value: string | number; label: string; note?: string; tone?: "red" | "orange" }) {
+function Kpi({
+  value,
+  label,
+  note,
+  tone,
+  icon,
+  hero,
+  percent,
+}: {
+  value: number | null;
+  label: string;
+  note?: string;
+  tone?: "red" | "orange";
+  icon: string;
+  hero?: boolean;
+  percent?: boolean;
+}) {
   return (
-    <div className="stat">
-      <div className="stat-value" style={{ color: tone ? `var(--${tone})` : undefined }}>
-        {value}
+    <div className={hero ? "stat hero" : "stat"}>
+      <div className="stat-top">
+        <span className="icon-chip">
+          <Icon name={icon} size={18} />
+        </span>
+      </div>
+      <div className="stat-value" style={{ color: tone && !hero ? `var(--${tone})` : undefined }}>
+        {value === null ? "—" : <CountUp value={percent ? Math.round(value * 100) : value} format={percent ? (n) => `${Math.round(n)}%` : undefined} />}
       </div>
       <div className="stat-label">{label}</div>
       {note && <div className="kpi-note">{note}</div>}
@@ -110,18 +132,22 @@ export function ReportsView({ initial, hasAi }: { initial: Summary; tz: string; 
       <div style={{ opacity: loading ? 0.55 : 1, transition: "opacity 200ms" }} className="stack-6">
         {empty && <Banner tone="info">עוד אין פעילות מעקב בתקופה הזו. הנתונים יתמלאו ככל שהצוות יכין הודעות ויתעד תוצאות.</Banner>}
 
-        <div className="kpi-grid">
-          <Kpi value={data.followupsDue} label="מעקבים לביצוע עכשיו" note="לקוחות ייחודיים, אחרי החרגות" />
+        <div className="kpi-grid kpis">
+          <Kpi hero icon="today" value={data.followupsDue} label="מעקבים לביצוע עכשיו" note="לקוחות ייחודיים, אחרי החרגות" />
           <Kpi
-            value={pct(data.tasks.completionRate)}
+            icon="checkCircle"
+            percent
+            value={data.tasks.completionRate}
             label="שיעור השלמת משימות"
             note={`${data.tasks.completed} מתוך ${data.tasks.due} שהגיע מועדן${data.tasks.dismissed ? ` · ${data.tasks.dismissed} הוחרגו` : ""}`}
           />
-          <Kpi value={f.markedSent} label="הודעות שסומנו כנשלחו" note={`${f.confirmed} מעקבים מאושרים (כולל שיחות)`} />
-          <Kpi value={pct(data.trialConversion.rate)} label="המרה אחרי ניסיון" note={`${data.trialConversion.converted} מתוך ${data.trialConversion.trials} · תוך 30 יום`} />
-          <Kpi value={data.renewals.linked} label="חידושים אחרי מעקב" note={`מתוך ${data.renewals.total} חידושים · תוך 14 יום`} />
+          <Kpi icon="message" value={f.markedSent} label="הודעות שסומנו כנשלחו" note={`${f.confirmed} מעקבים מאושרים (כולל שיחות)`} />
+          <Kpi icon="star" percent value={data.trialConversion.rate} label="המרה אחרי ניסיון" note={`${data.trialConversion.converted} מתוך ${data.trialConversion.trials} · תוך 30 יום`} />
+          <Kpi icon="refresh" value={data.renewals.linked} label="חידושים אחרי מעקב" note={`מתוך ${data.renewals.total} חידושים · תוך 14 יום`} />
           <Kpi
-            value={pct(data.dataCoverage.rate)}
+            icon="phone"
+            percent
+            value={data.dataCoverage.rate}
             label="תיקים עם טלפון תקין"
             note={`${data.dataCoverage.needsReview} לבדיקה`}
             tone={data.dataCoverage.rate !== null && data.dataCoverage.rate < 0.9 ? "orange" : undefined}

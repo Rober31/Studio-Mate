@@ -7,6 +7,7 @@ import { factsLine, type FactsLike } from "@/lib/facts";
 import { RULE_ACTION, RULE_ICON, RULE_LABEL, RULE_SHORT, STAGE_LABEL, STAGE_TONE, EXCLUDED_LABEL, OUTCOME_LABEL } from "@/lib/i18n";
 import { localInputValue, relTime, tomorrowAt } from "@/lib/format";
 import { Icon } from "../Icon";
+import { CountUp } from "../CountUp";
 import { Avatar, Badge, Banner, Button, EmptyState, IconButton, Menu, Sheet, TextArea, TextField, useToast, cx } from "../ui";
 import { Composer, type ComposerTarget } from "./Composer";
 import { OutcomeForm, type OutcomeTarget } from "./OutcomeForm";
@@ -159,18 +160,37 @@ export function TodayView({
       )}
 
       <div className="stats-3" style={{ marginBottom: 20 }}>
-        <button className="stat" aria-pressed={view === "all"} onClick={() => setView("all")}>
-          <div className="stat-value">{data.counts.needFollowup}</div>
+        <button className="stat hero" aria-pressed={view === "all"} onClick={() => setView("all")}>
+          <div className="stat-top">
+            <span className="icon-chip">
+              <Icon name="today" size={18} />
+            </span>
+          </div>
+          <div className="stat-value">
+            <CountUp value={data.counts.needFollowup} />
+          </div>
           <div className="stat-label">זקוקים למעקב</div>
         </button>
         <button className="stat" aria-pressed={view === "overdue"} onClick={() => setView(view === "overdue" ? "all" : "overdue")}>
-          <div className="stat-value" style={{ color: data.counts.overdue ? "var(--red)" : undefined }}>
-            {data.counts.overdue}
+          <div className="stat-top">
+            <span className={data.counts.overdue ? "icon-chip solid-red" : "icon-chip"}>
+              <Icon name="clock" size={18} />
+            </span>
+          </div>
+          <div className="stat-value">
+            <CountUp value={data.counts.overdue} />
           </div>
           <div className="stat-label">באיחור</div>
         </button>
         <button className="stat" aria-pressed={view === "ending"} onClick={() => setView(view === "ending" ? "all" : "ending")}>
-          <div className="stat-value">{data.counts.endingSoon}</div>
+          <div className="stat-top">
+            <span className="icon-chip">
+              <Icon name="card" size={18} />
+            </span>
+          </div>
+          <div className="stat-value">
+            <CountUp value={data.counts.endingSoon} />
+          </div>
           <div className="stat-label">מנויים מסתיימים</div>
         </button>
       </div>
